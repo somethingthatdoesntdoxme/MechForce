@@ -1,4 +1,4 @@
-package com.shrieeiee.mechforce;
+package com.somethingthatdoesntdoxme.mechforce;
 
 import android.os.Bundle;
 import android.view.InputDevice;

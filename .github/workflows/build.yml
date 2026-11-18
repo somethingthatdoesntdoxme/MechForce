@@ -149,6 +149,6 @@ jobs:
             - **Android:** `MechForce-Android.apk` (sideload)
             - **Browser / dedicated server:** `MechForce-Server-and-Web.zip`, or `MechForce-Browser.html` for offline single player
 
-            **Play in your browser:** https://shrieeiee.github.io/MechForce/
+            **Play in your browser:** https://somethingthatdoesntdoxme.github.io/MechForce/
 
             All versions crossplay. **Host Online** on any version (web included) gives a code friends enter in Join Game, or an invite link. Windows / Steam Deck can also **Host LAN Server**.

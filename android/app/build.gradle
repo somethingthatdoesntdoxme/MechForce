@@ -1,10 +1,10 @@
 apply plugin: 'com.android.application'
 
 android {
-    namespace "com.shrieeiee.mechforce"
+    namespace "com.somethingthatdoesntdoxme.mechforce"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.shrieeiee.mechforce"
+        applicationId "com.somethingthatdoesntdoxme.mechforce"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode Integer.parseInt(System.getenv("GITHUB_RUN_NUMBER") ?: "1")

@@ -17,7 +17,7 @@ import { ICON } from './icons.js';
 import { LocalSession, RemoteSession, wsUrlFor, PeerHostSession, PeerClientSession } from './net.js';
 
 export const IS_ARTIFACT = typeof __MF_ARTIFACT__ !== 'undefined' && __MF_ARTIFACT__;
-export const PUBLIC_URL = 'https://shrieeiee.github.io/MechForce/';
+export const PUBLIC_URL = 'https://somethingthatdoesntdoxme.github.io/MechForce/';
 import { native, isCapacitor, servedByHost, secureBrowser, platformName, canHost, canQuit, discover } from './platform.js';
 import { MECHS, WEAPONS, MISSIONS, THEMES, MAP_SIZES, CLASS_NAMES, VERSION, mechBV, CLIMATE, AI_LEVELS, AI_LEVEL_IDS } from '../core/data.js';
 import { Room, lanceTons, autoLance, entryTons } from '../core/room.js';

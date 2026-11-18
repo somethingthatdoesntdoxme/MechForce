@@ -1,4 +1,4 @@
-package com.shrieeiee.mechforce;
+package com.somethingthatdoesntdoxme.mechforce;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;

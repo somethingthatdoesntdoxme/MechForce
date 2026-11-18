@@ -1,5 +1,5 @@
 {
-  "appId": "com.shrieeiee.mechforce",
+  "appId": "com.somethingthatdoesntdoxme.mechforce",
   "appName": "MechForce",
   "webDir": "dist/web",
   "server": { "androidScheme": "http", "cleartext": true },

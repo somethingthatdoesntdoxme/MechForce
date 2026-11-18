@@ -20,7 +20,7 @@
     "esbuild": "^0.24.0",
     "peer": "^1.0.2"
   },
-  "author": "shrieeiee",
+  "author": "somethingthatdoesntdoxme",
   "license": "MIT",
   "main": "electron/main.cjs",
   "scripts": {
@@ -33,7 +33,7 @@
     "android:sync": "npm run build && npx cap sync android"
   },
   "build": {
-    "appId": "com.shrieeiee.mechforce",
+    "appId": "com.somethingthatdoesntdoxme.mechforce",
     "productName": "MechForce",
     "directories": {
       "output": "release",
