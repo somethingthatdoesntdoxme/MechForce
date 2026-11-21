@@ -1,7 +1,7 @@
 import { MECHS as DISK_MECHS } from './mechdata.js';
 import { EXTRA_MECHS } from './extradata.js';
 
-export const VERSION = '1.15.0';
+export const VERSION = '1.16.0';
 export const PROTOCOL = 11;
 
 // Weapon types, in the original program's order.

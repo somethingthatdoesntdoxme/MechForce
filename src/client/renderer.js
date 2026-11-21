@@ -24,6 +24,7 @@ import { center, DIR_ANGLE, toAxial, fromAxial, neighbor } from '../core/hex.js'
 import { WEAPONS, TERRAIN, UNITS } from '../core/data.js';
 import { view as palView, RING_SEGMENTS, shapeFor } from './palette.js';
 import { totalArmor, maxArmor, operational } from '../core/rules.js';
+import { renderScale, saverOn } from './perf.js';
 import { buildMech, buildItem, triggerWeaponAnim, tickWeaponAnims, rollTracks, buildStructure, buildUnit, skinMerge, BAKED_MAT } from './models.js';
 import { sfx } from './audio.js';
 import { input } from './input.js';
@@ -100,8 +101,8 @@ export class Renderer {
 
   setQuality(q) {
     this.quality = q;
-    const dpr = Math.min(window.devicePixelRatio || 1, q === 'high' ? 2 : q === 'medium' ? 1.5 : 1);
-    this.gl.setPixelRatio(q === 'low' ? Math.min(1, dpr) : dpr);
+    // the pixel ratio itself is set in resize(), where the handheld render scale applies
+    this.dprCap = q === 'high' ? 2 : q === 'medium' ? 1.5 : 1;
     this.gl.shadowMap.enabled = q !== 'low';
     // the sun covers the whole map and never moves, so the shadow map only needs redrawing
     // when something moves: every frame while animating, a few times a second otherwise
@@ -110,7 +111,8 @@ export class Renderer {
     this.shadowEvery = q === 'high' ? [1, 20] : [2, 30];
     if (this.terrainGroup) this.terrainGroup.traverse((o) => { if (o.userData.tree) o.castShadow = q === 'high'; });
     this.sun.castShadow = q !== 'low';
-    this.sun.shadow.mapSize.set(q === 'high' ? 2048 : 1024, q === 'high' ? 2048 : 1024);
+    const sm = q === 'high' && !saverOn() ? 2048 : 1024;
+    this.sun.shadow.mapSize.set(sm, sm);
     if (this.sun.shadow.map) { this.sun.shadow.map.dispose(); this.sun.shadow.map = null; }
     if (q !== 'low') {
       this.composer = new EffectComposer(this.gl);
@@ -126,6 +128,9 @@ export class Renderer {
 
   resize() {
     const w = this.canvas.clientWidth || window.innerWidth, h = this.canvas.clientHeight || window.innerHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, this.dprCap || 2);
+    this.renderRatio = dpr * renderScale(w, h, dpr);
+    this.gl.setPixelRatio(this.renderRatio);
     this.gl.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();

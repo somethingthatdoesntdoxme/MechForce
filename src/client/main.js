@@ -18,7 +18,8 @@ import { LocalSession, RemoteSession, wsUrlFor, PeerHostSession, PeerClientSessi
 
 export const IS_ARTIFACT = typeof __MF_ARTIFACT__ !== 'undefined' && __MF_ARTIFACT__;
 export const PUBLIC_URL = 'https://somethingthatdoesntdoxme.github.io/MechForce/';
-import { native, isCapacitor, servedByHost, secureBrowser, platformName, canHost, canQuit, discover } from './platform.js';
+import { native, isCapacitor, servedByHost, secureBrowser, platformName, canHost, canQuit, discover, handheld } from './platform.js';
+import { perf, sampleFrame, frameDue, noteInput, idleFor, saverOn } from './perf.js';
 import { MECHS, WEAPONS, MISSIONS, THEMES, MAP_SIZES, CLASS_NAMES, VERSION, mechBV, CLIMATE, AI_LEVELS, AI_LEVEL_IDS } from '../core/data.js';
 import { Room, lanceTons, autoLance, entryTons } from '../core/room.js';
 import { totalArmor, maxArmor, pilotingTN, reactorBlast, SELF_DESTRUCT_TN } from '../core/rules.js';
@@ -50,7 +51,7 @@ style.textContent = `
 ` + css;
 document.head.appendChild(style);
 
-const DEFAULTS = { name: '', quality: isCapacitor ? 'medium' : 'high', speed: 1, camSpeed: 1, sfx: 0.8, music: 0.4, sound: 'modern', glyphs: 'auto', tips: true, turn: '', signal: '', lastServer: '', lastRoom: '', tonnage: 200, colorblind: false, textScale: 1, keys: {}, mixSteps: 1, mixWeapons: 1, mixImpacts: 1, mixUi: 1, offSteps: 'quiet' };
+const DEFAULTS = { name: '', quality: isCapacitor || handheld ? 'medium' : 'high', fpsCap: 'auto', renderScale: 'auto', saver: 'auto', showFps: false, speed: 1, camSpeed: 1, sfx: 0.8, music: 0.4, sound: 'modern', glyphs: 'auto', tips: true, turn: '', signal: '', lastServer: '', lastRoom: '', tonnage: 200, colorblind: false, textScale: 1, keys: {}, mixSteps: 1, mixWeapons: 1, mixImpacts: 1, mixUi: 1, offSteps: 'quiet' };
 function loadSettings() {
   try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('mechforce.settings') || '{}') }; } catch { return { ...DEFAULTS }; }
 }
@@ -59,7 +60,7 @@ class App {
   constructor() {
     document.body.insertAdjacentHTML('beforeend', '<canvas id="gl"></canvas><div id="labels"></div><div id="floats"></div><div id="ui"></div>');
     this.settings = loadSettings();
-    if (!this.settings.name) this.settings.name = (platformName() === 'Steam Deck' ? 'Deck' : platformName()) + ' Pilot';
+    if (!this.settings.name) this.settings.name = (handheld ? handheld.short : platformName()) + ' Pilot';
     this.ui = $('#ui');
     this.renderer = new Renderer($('#gl'), $('#labels'));
     this.applySettings();
@@ -75,16 +76,28 @@ class App {
     window.addEventListener('mf-device', () => this.rerenderPrompts());
     window.addEventListener('pointerdown', () => initAudio(), { once: false });
     window.addEventListener('keydown', () => initAudio());
-    let last = performance.now();
+    let last = performance.now(), prevRaf = last, fpsN = 0, fpsT = last;
+    window.__mfPerf = perf;
+    for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'touchstart']) window.addEventListener(ev, noteInput, { passive: true });
+    input.on(noteInput);
     const loop = (now) => {
-      const dt = Math.min(0.05, (now - last) / 1000); last = now;
+      requestAnimationFrame(loop);
+      sampleFrame(now - prevRaf); prevRaf = now;
       pollInput(now);
-      if (Math.abs(input.move.x) + Math.abs(input.move.y) + Math.abs(input.cam.x) > 0.3) initAudio();
+      const moving = Math.abs(input.move.x) + Math.abs(input.move.y) + Math.abs(input.cam.x) + Math.abs(input.cam.y || 0) > 0.3;
+      if (moving) noteInput();
+      // frame pacing: draw every nth display refresh (see perf.js); idle = nobody has touched
+      // anything for a few seconds and nothing is animating
+      const r = this.renderer, idle = idleFor() > 4000 && !(r.tweens > 0) && !(r.pendingAnims > 0);
+      if (!frameDue(now, idle)) return;
+      const dt = Math.min(0.05, (now - last) / 1000); last = now;
+      if (moving) initAudio();
+      fpsN++;
+      if (now - fpsT >= 500) { perf.fps = Math.round(fpsN * 1000 / (now - fpsT)); fpsN = 0; fpsT = now; if (this.fpsEl) this.fpsEl.textContent = `${perf.fps} fps · ${Math.round(r.gl.domElement.width)}×${Math.round(r.gl.domElement.height)}${saverOn() ? ' · saver' : ''}`; }
       if (this.screen === 'battle') this.battle.tick(dt, now);
       else if (this.screen === 'title') this.renderer.cam.yaw += dt * 0.04;
       else if (this.screenTick) this.screenTick(dt, now);
       this.renderer.frame(dt);
-      requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
     const joinCode = (() => { try { return new URLSearchParams(location.search).get('join'); } catch { return null; } })();
@@ -93,9 +106,19 @@ class App {
     else this.showTitle();
   }
 
+  // performance settings: frame cap, render scale, battery saver, FPS readout (perf.js)
+  applyPerf() {
+    const s = this.settings;
+    perf.settings = { fpsCap: s.fpsCap ?? 'auto', renderScale: s.renderScale ?? 'auto', saver: s.saver ?? 'auto' };
+    perf.changed = () => { this.renderer.setQuality(this.settings.quality); };
+    if (s.showFps && !this.fpsEl) { this.fpsEl = document.createElement('div'); this.fpsEl.className = 'fps-readout'; document.body.appendChild(this.fpsEl); }
+    if (!s.showFps && this.fpsEl) { this.fpsEl.remove(); this.fpsEl = null; }
+  }
+
   saveSettings() { try { localStorage.setItem('mechforce.settings', JSON.stringify(this.settings)); } catch {} this.applySettings(); }
   applySettings() {
     const s = this.settings;
+    this.applyPerf();
     this.renderer.setQuality(s.quality);
     this.renderer.speed = s.speed;
     this.renderer.camSpeed = s.camSpeed;
@@ -419,7 +442,8 @@ class App {
     room.handle(id, { t: 'settings', settings: { mission: 'generic', mapSize: 'S', theme: themes[Math.floor(Math.random() * themes.length)], tonnage: 240 } });
     room.handle(id, { t: 'start' });
   }
-  stopAttract() { if (this.attract) { this.attract.dispose(); this.attract = null; audioSettings.attract = false; } }
+  // stopping the demo battle also drops its queued animations (a new renderer generation)
+  stopAttract() { if (this.attract) { this.attract.dispose(); this.attract = null; audioSettings.attract = false; this.renderer.gen = (this.renderer.gen || 0) + 1; } }
 
   // ------------------------------------------------------------ screens
   showTitle() {
@@ -953,6 +977,10 @@ class App {
     const s = this.settings;
     const defs = [
       { k: 'quality', label: 'Graphics', opts: ['low', 'medium', 'high'], fmt: (v) => ({ low: 'Low (fast)', medium: 'Medium', high: 'High' }[v]) },
+      { k: 'renderScale', label: '— Render resolution', opts: ['auto', 1, 0.85, 0.75, 0.67, 0.5], fmt: (v) => (v === 'auto' ? (handheld ? 'Auto (about 800p)' : 'Auto (full)') : Math.round(v * 100) + '%') },
+      { k: 'fpsCap', label: '— Frame rate', opts: ['auto', 30, 40, 45, 60, 0], fmt: (v) => (v === 'auto' ? (handheld ? 'Auto (60, 40 on battery)' : 'Auto (unlimited)') : v ? v + ' fps cap' : 'Unlimited') },
+      { k: 'saver', label: '— Battery saver', opts: ['auto', 'on', 'off'], fmt: (v) => ({ auto: handheld ? 'Auto (when unplugged)' : 'Auto', on: 'Always on', off: 'Off' }[v]) },
+      { k: 'showFps', label: '— Show frame rate', opts: [false, true], fmt: (v) => (v ? 'On' : 'Off') },
       { k: 'speed', label: 'Animation speed', opts: [0.75, 1, 1.5, 2, 3, 8], fmt: (v) => (v >= 8 ? 'Instant' : v + '×') },
       { k: 'camSpeed', label: 'Camera speed', opts: [0.5, 0.75, 1, 1.5, 2], fmt: (v) => v + '×' },
       { k: 'sfx', label: 'Sound effects', opts: [0, 0.2, 0.4, 0.6, 0.8, 1], fmt: (v) => Math.round(v * 10) + '/10' },
@@ -989,6 +1017,8 @@ class App {
         b.addEventListener('click', () => change(d.k, 1));
         box.appendChild(b);
       }
+      const dev = html(`<p class="faint" style="font-size:14px;margin:2px 0 0">${handheld ? `Running on a <b>${esc(handheld.name)}</b>` : `Running on ${esc(platformName())}`} · ${perf.refresh} Hz screen${perf.onBattery ? ' · on battery' : ''}. The settings marked — under Graphics trade looks for battery life.</p>`);
+      box.insertBefore(dev, box.querySelector('[data-key=speed]'));
       const kb = html('<div class="btn nav" data-key="keys">Keyboard controls…<span class="val">Rebind keys</span></div>');
       kb.addEventListener('click', () => this.showKeys(() => render()));
       box.appendChild(kb);

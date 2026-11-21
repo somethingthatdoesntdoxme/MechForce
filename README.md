@@ -6,7 +6,7 @@ Turn-based hex tactics with console-style 3D graphics, full controller support, 
 | Platform | Build | Controls |
 |---|---|---|
 | Windows | `MechForce-…-Windows-Setup.exe` / `…-Portable.exe` | Xbox/PS pads, keyboard + mouse |
-| Steam Deck / Linux | `MechForce-…-Linux-SteamDeck.AppImage` | Deck controls, touchscreen |
+| Steam Deck, Legion Go S & Linux | `MechForce-…-Linux-SteamDeck.AppImage` | Handheld controls, touchscreen |
 | Android | `MechForce-Android.apk` | Touch, Bluetooth/USB controllers |
 | Browser | **[play now](https://somethingthatdoesntdoxme.github.io/MechForce/)**, or served by any host, or `MechForce-Browser.html` | Gamepad API, keyboard + mouse, touch |
 
@@ -115,11 +115,21 @@ All platforms run the same engine and talk the same JSON protocol, so any mix ca
 
 Button prompts switch automatically between Xbox/Deck, PlayStation, keyboard and touch.
 
-## Steam Deck
+## Steam Deck, Legion Go S and other handhelds
 
-1. Copy the `.AppImage` to the Deck in Desktop Mode, right-click → Properties → Permissions → *Is executable*.
-2. Steam → *Add a Non-Steam Game* → pick the AppImage. Launch it from Game Mode; the Deck controls arrive as an Xbox pad and the game starts fullscreen.
-3. Hosting works from the Deck too.
+1. Copy the `.AppImage` over in Desktop Mode, right-click → Properties → Permissions → *Is executable*. (Windows handhelds like the ROG Ally or MSI Claw use the Windows build.)
+2. Steam → *Add a Non-Steam Game* → pick the AppImage. Launch it from Game Mode; the built-in controls arrive as an Xbox pad and the game starts fullscreen.
+3. Hosting works from a handheld too.
+
+The desktop app recognises the **Steam Deck (LCD and OLED), Legion Go S, Legion Go, Legion Go 2, ROG Ally / Ally X / Xbox Ally, MSI Claw, Zotac Zone, AYANEO, OneXPlayer and GPD** from their firmware, and anything running in SteamOS Game Mode (gamescope), and sets itself up for them:
+
+- **Render resolution:** high-res screens (the Go S and Ally at 1080p/1200p, the Legion Go at 1600p) draw about 1280×800 worth of pixels and scale up, which is most of the GPU work saved for little visible difference at arm's length.
+- **UI scale:** menus and text are laid out as if the screen were 1280×800, so they stay readable on an 8" panel.
+- **Frame cap:** 60 fps on the charger, 40 on battery, always an even divisor of the panel's refresh (40 on a 120 Hz Go S, 45 on a 90 Hz Deck OLED) so motion stays smooth. It's a turn-based game: there is nothing to gain from 120.
+- **Battery saver** (automatic when unplugged): lower render resolution, smaller shadow maps, and 20 fps while nobody is touching anything and nothing is moving.
+- **Medium graphics** by default, with GPU rasterisation turned on for the integrated graphics.
+
+All of it is under **Settings → Graphics**: render resolution, frame rate, battery saver and a frame-rate readout. SteamOS's own frame limiter and TDP slider still work on top. To force a profile on a device that isn't recognised, launch with `MF_HANDHELD=legion-go-s %command%` (or `MF_HANDHELD=1` for a generic 1280×800 handheld) in the game's Steam launch options; `MF_HANDHELD=0` turns detection off. In a browser, add `?handheld=1` to the address.
 
 ## Android
 

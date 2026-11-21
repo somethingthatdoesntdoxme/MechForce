@@ -6,7 +6,15 @@ export const isCapacitor = typeof window !== 'undefined' && !!(window.Capacitor 
 export const servedByHost = typeof location !== 'undefined' && location.protocol === 'http:' && !isCapacitor && !native && location.hostname !== '';
 export const secureBrowser = typeof location !== 'undefined' && location.protocol === 'https:' && !isCapacitor;
 
+// The handheld the desktop app is running on (electron/handheld.cjs), or null. In a browser,
+// ?handheld=1 in the address treats the device as a generic 1280x800 handheld.
+export const device = (native && native.device) || { handheld: null, gamescope: false };
+export const handheld = device.handheld || (typeof location !== 'undefined' && /[?&]handheld=1/.test(location.search)
+  ? { id: 'generic', name: 'Handheld', short: 'Handheld', inches: 7, w: 1280, h: 800, hz: 60, family: 'pc' } : null);
+
 export function platformName() {
+  if (handheld && handheld.family === 'deck') return 'Steam Deck';
+  if (handheld) return handheld.name;
   if (native) return native.isDeck ? 'Steam Deck' : native.platform === 'win32' ? 'Windows' : native.platform === 'darwin' ? 'Mac' : 'Linux';
   if (isCapacitor) return 'Android';
   return 'Browser';

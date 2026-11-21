@@ -645,3 +645,6 @@ table.tt td { padding: 2px 8px 2px 0; vertical-align: top; } table.tt td:first-c
 .coach-dots i.on { background: var(--amber); } .coach-dots i.done { background: var(--ink-dim); }
 .coach.min { width: auto; padding: 6px 10px; cursor: pointer; }
 @media (max-width: 760px), (max-height: 520px) { .coach { top: max(64px, calc(env(safe-area-inset-top, 0px) + 58px)); width: min(300px, 62vw); font-size: 12.5px; padding: 8px 10px; } .coach > b { font-size: 15px; } .coach .faint { display: none; } }
+
+/* frame-rate readout (Settings → Show frame rate) */
+.fps-readout { position: fixed; right: max(8px, env(safe-area-inset-right, 0px)); bottom: max(6px, env(safe-area-inset-bottom, 0px)); z-index: 50; font: 600 12px/1 var(--display); letter-spacing: 0.05em; color: var(--ink-dim); background: rgba(0, 0, 0, 0.45); padding: 4px 7px; border-radius: 4px; pointer-events: none; }
