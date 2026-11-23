@@ -28,6 +28,7 @@ import { renderScale, saverOn } from './perf.js';
 import { buildMech, buildItem, triggerWeaponAnim, tickWeaponAnims, rollTracks, buildStructure, buildUnit, skinMerge, BAKED_MAT, disposeModel } from './models.js';
 import { sfx } from './audio.js';
 import { input } from './input.js';
+import { rnd, patchNoise, hexAtPoint, liquidMaterial, skyDome } from './terrainfx.js';
 
 const ELEV = 0.42;
 export const topY = (e) => 0.2 + e * ELEV;
@@ -36,11 +37,11 @@ const facingRot = (f) => { const a = DIR_ANGLE[f] * Math.PI / 180; return Math.a
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const THEMES = {
-  temperate: { t: ['#6a8a45', '#55773a', '#3c5b2e', '#857f6c', '#2f6584', '#1f4a68'], side: '#54473a', ground: '#3a4630', fog: '#9fb4bd', sky: '#b9ccd4', hemi: ['#d8ecff', '#4d5b3a'], sun: '#fff1d6', tree: ['#3f6b2c', '#2f5524'], trunk: '#5a4330', rock: '#7d786a', water: '#3a7aa0', lava: false },
-  desert: { t: ['#cfa96c', '#a7a25c', '#7d8443', '#b48a5c', '#3c8597', '#2a6576'], side: '#94714a', ground: '#b08b5c', fog: '#e9d1a6', sky: '#f0dcb4', hemi: ['#fff1d8', '#a07a4c'], sun: '#ffe2b0', tree: ['#7e8a3e', '#5f6b2e'], trunk: '#6b4b2e', rock: '#9c7a52', water: '#3f95a8', lava: false },
-  snow: { t: ['#e4ebf1', '#b7c9bf', '#86a092', '#c3ccd6', '#7aa0bb', '#557d9b'], side: '#909eab', ground: '#c9d4de', fog: '#d6e1ea', sky: '#e3ecf3', hemi: ['#f0f6ff', '#8592a0'], sun: '#ffffff', tree: ['#3d5d4f', '#2d4a3e'], trunk: '#4e4038', rock: '#a9b4bf', water: '#8fb7d0', lava: false },
-  lunar: { t: ['#8e9096', '#8e9096', '#8e9096', '#6f7178', '#55575e', '#45474d'], side: '#4b4d54', ground: '#2b2c31', fog: '#06070c', sky: '#05060a', hemi: ['#c8d0ff', '#1a1a22'], sun: '#f4f6ff', tree: ['#666', '#555'], trunk: '#444', rock: '#5d5f66', water: '#55575e', lava: false, stars: true },
-  volcanic: { t: ['#3e3734', '#4a3f30', '#352d24', '#2c2523', '#ff5a1f', '#ff3d0a'], side: '#25201e', ground: '#1d1715', fog: '#3a1d14', sky: '#2a130d', hemi: ['#ffb08a', '#2a1510'], sun: '#ffc39a', tree: ['#3b3326', '#2b241b'], trunk: '#2a201a', rock: '#3a302c', water: '#ff5a1f', lava: true },
+  temperate: { zenith: '#6c97bd', t: ['#6a8a45', '#55773a', '#3c5b2e', '#857f6c', '#2f6584', '#1f4a68'], side: '#54473a', ground: '#3a4630', fog: '#9fb4bd', sky: '#b9ccd4', hemi: ['#d8ecff', '#4d5b3a'], sun: '#fff1d6', tree: ['#3f6b2c', '#2f5524'], trunk: '#5a4330', rock: '#7d786a', water: '#3a7aa0', lava: false },
+  desert: { zenith: '#d7a86c', t: ['#cfa96c', '#a7a25c', '#7d8443', '#b48a5c', '#3c8597', '#2a6576'], side: '#94714a', ground: '#b08b5c', fog: '#e9d1a6', sky: '#f0dcb4', hemi: ['#fff1d8', '#a07a4c'], sun: '#ffe2b0', tree: ['#7e8a3e', '#5f6b2e'], trunk: '#6b4b2e', rock: '#9c7a52', water: '#3f95a8', lava: false },
+  snow: { zenith: '#9fbbd3', t: ['#e4ebf1', '#b7c9bf', '#86a092', '#c3ccd6', '#7aa0bb', '#557d9b'], side: '#909eab', ground: '#c9d4de', fog: '#d6e1ea', sky: '#e3ecf3', hemi: ['#f0f6ff', '#8592a0'], sun: '#ffffff', tree: ['#3d5d4f', '#2d4a3e'], trunk: '#4e4038', rock: '#a9b4bf', water: '#8fb7d0', lava: false },
+  lunar: { zenith: '#000000', t: ['#8e9096', '#8e9096', '#8e9096', '#6f7178', '#55575e', '#45474d'], side: '#4b4d54', ground: '#2b2c31', fog: '#06070c', sky: '#05060a', hemi: ['#c8d0ff', '#1a1a22'], sun: '#f4f6ff', tree: ['#666', '#555'], trunk: '#444', rock: '#5d5f66', water: '#55575e', lava: false, stars: true },
+  volcanic: { zenith: '#100604', t: ['#3e3734', '#4a3f30', '#352d24', '#2c2523', '#ff5a1f', '#ff3d0a'], side: '#25201e', ground: '#1d1715', fog: '#3a1d14', sky: '#2a130d', hemi: ['#ffb08a', '#2a1510'], sun: '#ffc39a', tree: ['#3b3326', '#2b241b'], trunk: '#2a201a', rock: '#3a302c', water: '#ff5a1f', lava: true },
 };
 
 function radialTexture() {
@@ -145,49 +146,72 @@ export class Renderer {
   // them without touching mechs, structures or effects.
   buildTerrain(map) {
     const th = this.theme;
-    if (this.terrainGroup) { this.world.remove(this.terrainGroup); this.terrainGroup.traverse((o) => { if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose(); }); }
+    if (this.terrainGroup) { this.world.remove(this.terrainGroup); disposeModel(this.terrainGroup); }
     const tg = this.terrainGroup = new THREE.Group();
     this.world.add(tg);
-    const rnd = (i) => { const x = Math.sin(i * 12.9898) * 43758.5453; return x - Math.floor(x); };
     const { w, h } = map;
     const pos = [], col = [], idx = [];
     const lines = [];
-    const tmpC = new THREE.Color();
+    const tmpC = new THREE.Color(), sideC = new THREE.Color(), capC = new THREE.Color(), earth = new THREE.Color(th.side);
     const corners = [];
     for (let i = 0; i < 6; i++) { const a = (60 * i - 30) * Math.PI / 180; corners.push([Math.cos(a), Math.sin(a)]); }
     let vi = 0;
-    const waterPos = [], waterIdx = [];
+    const waterPos = [], waterIdx = [], waterShore = [];
     let wvi = 0;
+    const tileAt = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? -1 : map.t[y * w + x]);
+    const isLiquid = (t) => t === 4 || t === 5;
+    const pushCol = (c, k = 1) => col.push(c.r * k, c.g * k, c.b * k);
+    // One hex column: a top with a small bevelled lip (so tiles read as solid blocks with soft
+    // edges rather than flat cards), then sides with a band of the top colour (the grass or
+    // snow line) over earth that darkens toward the bottom.
+    const BEVEL = 0.05, RIN = 0.86, R = 0.995, CAP = 0.1;
+    const column = (cx, cz, top, base, topCol, sideCol) => {
+      const lip = top - BEVEL;
+      pos.push(cx, top, cz); pushCol(topCol);
+      const ci = vi++;
+      for (let k = 0; k < 6; k++) { pos.push(cx + corners[k][0] * RIN, top, cz + corners[k][1] * RIN); pushCol(topCol, 0.97); vi++; }
+      for (let k = 0; k < 6; k++) idx.push(ci, ci + 1 + ((k + 1) % 6), ci + 1 + k);
+      // bevel ring
+      const bi = vi;
+      for (let k = 0; k < 6; k++) { pos.push(cx + corners[k][0] * R, lip, cz + corners[k][1] * R); pushCol(topCol, 0.86); vi++; }
+      for (let k = 0; k < 6; k++) {
+        const i0 = ci + 1 + k, i1 = ci + 1 + ((k + 1) % 6), o0 = bi + k, o1 = bi + ((k + 1) % 6);
+        idx.push(i0, i1, o1, i0, o1, o0);
+      }
+      // sides: cap band, then earth
+      const capBottom = Math.max(base, lip - CAP);
+      capC.copy(topCol).multiplyScalar(0.72);
+      for (let k = 0; k < 6; k++) {
+        const a = corners[k], b = corners[(k + 1) % 6];
+        const ax = cx + a[0] * R, az = cz + a[1] * R, bx = cx + b[0] * R, bz = cz + b[1] * R;
+        let s0 = vi;
+        pos.push(ax, lip, az, bx, lip, bz, bx, capBottom, bz, ax, capBottom, az);
+        pushCol(capC); pushCol(capC); pushCol(capC, 0.9); pushCol(capC, 0.9);
+        vi += 4; idx.push(s0, s0 + 1, s0 + 2, s0, s0 + 2, s0 + 3);
+        s0 = vi;
+        pos.push(ax, capBottom, az, bx, capBottom, bz, bx, base, bz, ax, base, az);
+        pushCol(sideCol); pushCol(sideCol); pushCol(sideCol, 0.5); pushCol(sideCol, 0.5);
+        vi += 4; idx.push(s0, s0 + 1, s0 + 2, s0, s0 + 2, s0 + 3);
+      }
+    };
+    // tile colour: theme colour, nudged by broad patches, a little per-tile jitter and height
+    const tileColour = (out, t, x, y, e) => {
+      out.set(th.t[t]);
+      if (!isLiquid(t)) {
+        const n = patchNoise(x + 40, y + 40, 4.5, 1) - 0.5, n2 = patchNoise(x + 9, y + 3, 2.2, 7) - 0.5;
+        out.offsetHSL(n2 * 0.025, n * 0.1, n * 0.07 + (rnd(x * 31 + y * 17) - 0.5) * 0.045 + e * 0.025);
+      }
+      return out;
+    };
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const t = map.t[y * w + x], e = map.e[y * w + x];
       const c = center(x, y);
-      const isWater = t === 4 || t === 5;
+      const isWater = isLiquid(t);
       const top = isWater ? topY(0) - (t === 5 ? 0.3 : 0.18) : topY(e);
-      const base = -0.6;
-      tmpC.set(th.t[t]);
-      const jitter = (rnd(x * 31 + y * 17) - 0.5) * 0.08;
-      tmpC.offsetHSL(0, 0, jitter + e * 0.025);
-      const side = new THREE.Color(th.side).offsetHSL(0, 0, e * 0.02 - 0.02);
-      const R = 0.995;
-      // top centre + ring
-      pos.push(c.px, top, c.py); col.push(tmpC.r, tmpC.g, tmpC.b);
-      const ci = vi++;
-      for (let k = 0; k < 6; k++) {
-        pos.push(c.px + corners[k][0] * R, top, c.py + corners[k][1] * R);
-        const edgeShade = 0.9;
-        col.push(tmpC.r * edgeShade, tmpC.g * edgeShade, tmpC.b * edgeShade);
-        vi++;
-      }
-      for (let k = 0; k < 6; k++) idx.push(ci, ci + 1 + ((k + 1) % 6), ci + 1 + k);
-      // sides
-      for (let k = 0; k < 6; k++) {
-        const a = corners[k], b = corners[(k + 1) % 6];
-        const s0 = vi;
-        pos.push(c.px + a[0] * R, top, c.py + a[1] * R, c.px + b[0] * R, top, c.py + b[1] * R, c.px + b[0] * R, base, c.py + b[1] * R, c.px + a[0] * R, base, c.py + a[1] * R);
-        for (let q = 0; q < 4; q++) { const f = q < 2 ? 1 : 0.55; col.push(side.r * f, side.g * f, side.b * f); }
-        vi += 4;
-        idx.push(s0, s0 + 1, s0 + 2, s0, s0 + 2, s0 + 3);
-      }
+      tileColour(tmpC, t, x, y, e);
+      // earth sides pick up a little of the tile colour so cliffs don't read as black voids
+      sideC.copy(earth).lerp(tmpC, 0.22).offsetHSL(0, 0, 0.03 + e * 0.02);
+      column(c.px, c.py, top, -0.6, tmpC, sideC);
       // grid outline
       for (let k = 0; k < 6; k++) {
         const a = corners[k], b = corners[(k + 1) % 6];
@@ -195,27 +219,77 @@ export class Renderer {
       }
       if (isWater) {
         const wy = topY(0) - 0.06;
-        waterPos.push(c.px, wy, c.py);
+        waterPos.push(c.px, wy, c.py); waterShore.push(0);
         const w0 = wvi++;
-        for (let k = 0; k < 6; k++) { waterPos.push(c.px + corners[k][0], wy, c.py + corners[k][1]); wvi++; }
+        for (let k = 0; k < 6; k++) {
+          const px = c.px + corners[k][0], pz = c.py + corners[k][1];
+          waterPos.push(px, wy, pz);
+          // a corner is on the shore if either neighbour sharing it is dry land (or off the map)
+          let shore = 0;
+          for (const da of [-30, 30]) {
+            const a = (60 * k - 30 + da) * Math.PI / 180, nb = hexAtPoint(c.px + Math.cos(a) * 1.732, c.py + Math.sin(a) * 1.732);
+            if (!isLiquid(tileAt(nb.x, nb.y))) shore = 1;
+          }
+          waterShore.push(shore); wvi++;
+        }
         for (let k = 0; k < 6; k++) waterIdx.push(w0, w0 + 1 + ((k + 1) % 6), w0 + 1 + k);
       }
     }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-    g.setIndex(idx);
-    g.computeVertexNormals();
-    const terrain = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.02, flatShading: true }));
+    const mapIdxEnd = idx.length;
+    // Scenery beyond the map edge: a few rings of lower, darker, unplayable hexes (some wooded)
+    // so the battlefield sits in a landscape instead of floating over a flat plane.
+    const rings = this.quality === 'low' ? 3 : 5;
+    const decorTrees = [];
+    for (let y = -rings; y < h + rings; y++) for (let x = -rings; x < w + rings; x++) {
+      if (x >= 0 && y >= 0 && x < w && y < h) continue;
+      const d = Math.max(-x, -y, x - (w - 1), y - (h - 1));
+      const c = center(x, y);
+      const n = patchNoise(x + 40, y + 40, 4.5, 1);
+      // nearest map tile's height, falling away with distance, plus some rolling ground
+      const nx = Math.max(0, Math.min(w - 1, x)), ny = Math.max(0, Math.min(h - 1, y));
+      const edgeE = isLiquid(map.t[ny * w + nx]) ? 0 : map.e[ny * w + nx];
+      const e = Math.max(0, Math.round(edgeE * 0.6 + (n - 0.35) * 3 - d * 0.35));
+      const lava = map.theme === 'volcanic';
+      const t = lava ? (n > 0.6 ? 2 : n > 0.4 ? 0 : 3) : n > 0.62 ? 2 : n > 0.5 ? 1 : (rnd(x * 13 + y * 7) > 0.85 ? 3 : 0);
+      tileColour(tmpC, t, x, y, e);
+      // clearly off the board: a step lower and noticeably darker, more so further out
+      // (multiplying rather than shifting lightness so bright snow and moon dust darken too)
+      tmpC.offsetHSL(0, -0.1, 0).multiplyScalar(Math.max(0.45, 0.7 - d * 0.05));
+      sideC.copy(earth).lerp(tmpC, 0.22).multiplyScalar(0.8);
+      const top = topY(e) - 0.5;
+      column(c.px, c.py, top, -0.6, tmpC, sideC);
+      if ((t === 1 || t === 2) && map.theme !== 'lunar') {
+        const nT = this.quality === 'low' ? 1 : t === 2 ? 3 : 2;
+        for (let i = 0; i < nT; i++) {
+          const r = Math.sqrt(rnd(x * 7 + y * 13 + i * 3.1)) * 0.68, a = rnd(x * 5 + y * 11 + i * 7.7) * Math.PI * 2;
+          decorTrees.push({ x: c.px + Math.cos(a) * r, z: c.py + Math.sin(a) * r, y: top, s: 0.7 + rnd(x + y * 3 + i) * 0.6, dark: t === 2 });
+        }
+      }
+    }
+    // map tiles and scenery share one vertex buffer but are separate meshes: clicks only ever
+    // land on the map, and only the map casts shadows (flat shading needs no normals)
+    const posAttr = new THREE.Float32BufferAttribute(pos, 3), colAttr = new THREE.Float32BufferAttribute(col, 3);
+    const terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.02, flatShading: true });
+    const mapGeo = new THREE.BufferGeometry();
+    mapGeo.setAttribute('position', posAttr); mapGeo.setAttribute('color', colAttr);
+    mapGeo.setIndex(idx.slice(0, mapIdxEnd));
+    const terrain = new THREE.Mesh(mapGeo, terrainMat);
     terrain.receiveShadow = true; terrain.castShadow = true;
     this.terrain = terrain;
     tg.add(terrain);
+    const sceneryGeo = new THREE.BufferGeometry();
+    sceneryGeo.setAttribute('position', posAttr); sceneryGeo.setAttribute('color', colAttr);
+    sceneryGeo.setIndex(idx.slice(mapIdxEnd));
+    const scenery = new THREE.Mesh(sceneryGeo, terrainMat);
+    scenery.receiveShadow = true;
+    tg.add(scenery);
     const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.Float32BufferAttribute(lines, 3));
     tg.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: map.theme === 'snow' ? '#5a6878' : '#000000', transparent: true, opacity: map.theme === 'snow' ? 0.22 : 0.16 })));
     if (waterPos.length) {
-      const wg = new THREE.BufferGeometry(); wg.setAttribute('position', new THREE.Float32BufferAttribute(waterPos, 3)); wg.setIndex(waterIdx); wg.computeVertexNormals();
-      this.waterMat = new THREE.MeshStandardMaterial({ color: th.water, transparent: !th.lava, opacity: th.lava ? 1 : 0.72, roughness: th.lava ? 0.7 : 0.3, metalness: th.lava ? 0 : 0.1,
-        emissive: th.lava ? new THREE.Color('#ff3c00') : new THREE.Color('#0a2a3a'), emissiveIntensity: th.lava ? 1.3 : 0.3 });
+      const wg = new THREE.BufferGeometry(); wg.setAttribute('position', new THREE.Float32BufferAttribute(waterPos, 3));
+      wg.setAttribute('shore', new THREE.Float32BufferAttribute(waterShore, 1)); wg.setIndex(waterIdx); wg.computeVertexNormals();
+      this.liquidU = this.liquidU || { uTime: { value: 0 } };
+      this.waterMat = liquidMaterial(th, th.lava, this.liquidU);
       tg.add(new THREE.Mesh(wg, this.waterMat));
     } else this.waterMat = null;
     // ground skirt
@@ -242,20 +316,34 @@ export class Renderer {
       }
     }
     const lunar = map.theme === 'lunar';
-    if (trees.length && !lunar) {
-      const cone = new THREE.ConeGeometry(0.22, 0.75, 6); cone.translate(0, 0.62, 0);
-      const trunk = new THREE.CylinderGeometry(0.04, 0.05, 0.3, 5); trunk.translate(0, 0.15, 0);
-      const im = new THREE.InstancedMesh(cone, new THREE.MeshStandardMaterial({ roughness: 0.85, flatShading: true }), trees.length);
-      const it = new THREE.InstancedMesh(trunk, new THREE.MeshStandardMaterial({ color: th.trunk, roughness: 1 }), trees.length);
-      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3();
-      trees.forEach((tr, i) => {
-        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), tr.x * 3); sc.set(tr.s, tr.s, tr.s); p.set(tr.x, tr.y, tr.z);
-        m4.compose(p, q, sc); im.setMatrixAt(i, m4); it.setMatrixAt(i, m4);
-        im.setColorAt(i, new THREE.Color(tr.dark ? th.tree[1] : th.tree[0]).offsetHSL(0, 0, (rnd(i) - 0.5) * 0.08));
+    // trees on the board (shadows on high quality) and off it (no shadows, no trunks, darker
+    // to match the scenery): one instanced mesh each, so thousands of trees cost a few draws
+    const cone = new THREE.ConeGeometry(0.22, 0.75, 6); cone.translate(0, 0.62, 0);
+    const addTrees = (list, onBoard) => {
+      if (!list.length || lunar) return;
+      const im = new THREE.InstancedMesh(cone, new THREE.MeshStandardMaterial({ roughness: 0.85, flatShading: true }), list.length);
+      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0), tc = new THREE.Color();
+      let it = null;
+      if (onBoard) {
+        const trunk = new THREE.CylinderGeometry(0.04, 0.05, 0.3, 5); trunk.translate(0, 0.15, 0);
+        it = new THREE.InstancedMesh(trunk, new THREE.MeshStandardMaterial({ color: th.trunk, roughness: 1 }), list.length);
+      }
+      list.forEach((tr, i) => {
+        q.setFromAxisAngle(up, tr.x * 3); sc.set(tr.s, tr.s, tr.s); p.set(tr.x, tr.y, tr.z);
+        m4.compose(p, q, sc); im.setMatrixAt(i, m4); if (it) it.setMatrixAt(i, m4);
+        tc.set(tr.dark ? th.tree[1] : th.tree[0]).offsetHSL(0, 0, (rnd(i) - 0.5) * 0.08);
+        if (!onBoard) tc.multiplyScalar(0.7);
+        im.setColorAt(i, tc);
       });
-      im.castShadow = this.quality === 'high'; im.receiveShadow = true; it.castShadow = this.quality === 'high'; im.userData.tree = true; it.userData.tree = true;
-      tg.add(im, it);
-    }
+      im.receiveShadow = true;
+      if (onBoard) {
+        im.castShadow = it.castShadow = this.quality === 'high';
+        im.userData.tree = it.userData.tree = true;
+        tg.add(im, it);
+      } else tg.add(im);
+    };
+    addTrees(trees, true);
+    addTrees(decorTrees, false);
     if (rocks.length) {
       const rg = new THREE.DodecahedronGeometry(1, 0);
       const rm = new THREE.InstancedMesh(rg, new THREE.MeshStandardMaterial({ color: th.rock, roughness: 0.95, flatShading: true }), rocks.length);
@@ -285,7 +373,9 @@ export class Renderer {
     this.marks = this.marks ? [] : this.marks;
     const th = THEMES[map.theme] || THEMES.temperate;
     this.theme = th;
-    this.scene.background = new THREE.Color(th.sky);
+    this.scene.background = new THREE.Color(th.fog);
+    // distance haze: its range follows the camera (see updateCamera) so the board stays crisp
+    // while the scenery and ground beyond fade into the sky
     this.scene.fog = new THREE.Fog(th.fog, 40, 110);
     this.hemi.color.set(th.hemi[0]); this.hemi.groundColor.set(th.hemi[1]);
     // a softer sun and more sky light: bright enough to read, without glints off water and metal
@@ -303,6 +393,8 @@ export class Renderer {
     sc.left = -span; sc.right = span; sc.top = span; sc.bottom = -span; sc.near = 1; sc.far = 80; sc.updateProjectionMatrix();
     this.cam.want.set(cx, 0, cz); this.cam.target.copy(this.cam.want);
     this.mapCenter = new THREE.Vector3(cx, 0, cz);
+    this.mapSpan = Math.hypot(this.bounds.x1 - this.bounds.x0, this.bounds.z1 - this.bounds.z0) / 2;
+    const dome = skyDome(th.fog, th.zenith); dome.position.set(cx, 0, cz); this.world.add(dome);
     // edge markers group (mission exits)
     this.edgeGroup = new THREE.Group(); this.world.add(this.edgeGroup);
     for (const m of this.mechs.values()) { this.fxGroup.remove(m.smoke); }
@@ -715,6 +807,11 @@ export class Renderer {
     const off = new THREE.Vector3(Math.sin(c.yaw) * Math.cos(c.pitch), Math.sin(c.pitch), Math.cos(c.yaw) * Math.cos(c.pitch)).multiplyScalar(c.dist);
     this.camera.position.copy(c.target).add(off);
     this.camera.lookAt(c.target);
+    if (this.scene.fog && this.mapSpan) {
+      const f = this.scene.fog;
+      f.near = c.dist + this.mapSpan * 0.9;
+      f.far = f.near + 26 + this.mapSpan * 0.5;
+    }
   }
 
   // Smooth 60° turns from the on-screen buttons
@@ -982,6 +1079,7 @@ export class Renderer {
   }
 
   frame(dt) {
+    if (this.liquidU) this.liquidU.uTime.value = this.time;
     if (this.fireFx) for (const f of this.fireFx) {
       const t = this.time * (f.glow ? 3 : 7) + f.ph;
       if (f.glow) { f.sp.material.opacity = 0.25 + Math.sin(t) * 0.08 + Math.random() * 0.05; continue; }

@@ -58,7 +58,7 @@ function loadSettings() {
 
 class App {
   constructor() {
-    document.body.insertAdjacentHTML('beforeend', '<canvas id="gl"></canvas><div id="labels"></div><div id="floats"></div><div id="ui"></div>');
+    document.body.insertAdjacentHTML('beforeend', '<canvas id="gl"></canvas><div id="vignette"></div><div id="labels"></div><div id="floats"></div><div id="ui"></div>');
     this.settings = loadSettings();
     if (!this.settings.name) this.settings.name = (handheld ? handheld.short : platformName()) + ' Pilot';
     this.ui = $('#ui');
