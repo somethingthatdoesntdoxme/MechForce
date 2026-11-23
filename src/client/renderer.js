@@ -25,7 +25,7 @@ import { WEAPONS, TERRAIN, UNITS } from '../core/data.js';
 import { view as palView, RING_SEGMENTS, shapeFor } from './palette.js';
 import { totalArmor, maxArmor, operational } from '../core/rules.js';
 import { renderScale, saverOn } from './perf.js';
-import { buildMech, buildItem, triggerWeaponAnim, tickWeaponAnims, rollTracks, buildStructure, buildUnit, skinMerge, BAKED_MAT } from './models.js';
+import { buildMech, buildItem, triggerWeaponAnim, tickWeaponAnims, rollTracks, buildStructure, buildUnit, skinMerge, BAKED_MAT, disposeModel } from './models.js';
 import { sfx } from './audio.js';
 import { input } from './input.js';
 
@@ -88,7 +88,7 @@ export class Renderer {
     this.mechs = new Map();
     this.particles = [];
     this.beams = [];
-    this.tex = radialTexture();
+    this.tex = radialTexture(); this.tex.userData.shared = true;
     this.raycaster = new THREE.Raycaster();
     this.time = 0;
     this.queue = Promise.resolve();
@@ -114,14 +114,18 @@ export class Renderer {
     const sm = q === 'high' && !saverOn() ? 2048 : 1024;
     this.sun.shadow.mapSize.set(sm, sm);
     if (this.sun.shadow.map) { this.sun.shadow.map.dispose(); this.sun.shadow.map = null; }
-    if (q !== 'low') {
+    // The bloom chain owns a dozen render targets: build it once and keep it (this used to
+    // make a fresh one, leaking the old, every time settings were saved or power changed)
+    const dropComposer = () => { if (!this.composer) return; for (const ps of this.composer.passes) ps.dispose?.(); this.composer.dispose(); this.composer = null; };
+    if (q === 'low') dropComposer();
+    else if (!this.composer) {
       this.composer = new EffectComposer(this.gl);
       this.composer.addPass(new RenderPass(this.scene, this.camera));
       this.composer.addPass(new ShaderPass(SANITIZE));
       this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.4, 0.4, 0.92);
       this.composer.addPass(this.bloom);
       this.composer.addPass(new OutputPass());
-    } else this.composer = null;
+    }
     this.resize();
     this.gl.compile(this.scene, this.camera);
   }
@@ -275,6 +279,8 @@ export class Renderer {
   buildMap(map) {
     this.gen = (this.gen || 0) + 1;
     this.map = map;
+    // free the old battle's models, terrain and effects before dropping them (shared pieces stay)
+    disposeModel(this.world);
     this.world.clear();
     this.marks = this.marks ? [] : this.marks;
     const th = THEMES[map.theme] || THEMES.temperate;
@@ -318,7 +324,7 @@ export class Renderer {
   }
 
   setExitEdges(edges) {
-    this.edgeGroup.clear();
+    disposeModel(this.edgeGroup); this.edgeGroup.clear();
     if (!edges || !edges.length) return;
     const geo = new THREE.CircleGeometry(0.9, 6); geo.rotateX(-Math.PI / 2); geo.rotateY(Math.PI / 6);
     for (const { x: ex, color } of edges) {
@@ -362,7 +368,7 @@ export class Renderer {
       if (!v.animating) this.placeMech(v, m);
       this.updateMechLook(v, m);
     }
-    for (const [id, v] of this.mechs) if (!seen.has(id)) { this.mechGroup.remove(v.model.root); v.label.remove(); if (v.ghost) this.world.remove(v.ghost); this.mechs.delete(id); }
+    for (const [id, v] of this.mechs) if (!seen.has(id)) { this.mechGroup.remove(v.model.root); disposeModel(v.model); v.label.remove(); if (v.ghost) { this.world.remove(v.ghost); disposeModel(v.ghost); } this.mechs.delete(id); }
     // item
     const it = state.item;
     if (it && !it.gone) {
@@ -402,7 +408,7 @@ export class Renderer {
       sv.model.root.rotation.y = facingRot(s.f || 0);
       sv.model.root.visible = !s.dead;
     }
-    for (const [id, sv] of this.structs) if (!seen.has(id)) { this.structGroup.remove(sv.model.root); this.structs.delete(id); }
+    for (const [id, sv] of this.structs) if (!seen.has(id)) { this.structGroup.remove(sv.model.root); disposeModel(sv.model); this.structs.delete(id); }
   }
 
   // Infantry and vehicles. Views look like structure views ('u' + id), so aiming and firing
@@ -432,7 +438,7 @@ export class Renderer {
       uv.model.root.visible = !u.dead && !u.hidden && u.x >= 0;
       this.unitLosses(uv);
     }
-    for (const [id, uv] of this.units) if (!seen.has(id)) { this.unitGroup.remove(uv.model.root); this.units.delete(id); }
+    for (const [id, uv] of this.units) if (!seen.has(id)) { this.unitGroup.remove(uv.model.root); disposeModel(uv.model); this.units.delete(id); }
   }
   unitY(u) { const t = this.map.t[u.y * this.map.w + u.x]; return t >= 4 ? topY(0) - 0.04 : this.tileTop(u.x, u.y); }
   unitLosses(uv) {
@@ -465,7 +471,7 @@ export class Renderer {
   // Fire and smoke: flickering flames over burning hexes, smoke drifting with the wind
   setEnvironment(state) {
     if (!this.envGroup || !this.map) return;
-    this.envGroup.clear();
+    disposeModel(this.envGroup); this.envGroup.clear();
     this.fireFx = []; this.smokeFx = [];
     const { w } = this.map;
     const windA = state.wind !== undefined ? DIR_ANGLE[state.wind] * Math.PI / 180 : 0;
@@ -595,7 +601,7 @@ export class Renderer {
     if (!this.map) return;
     const need = this.map.w * this.map.h;
     if (this.reachMesh.instanceMatrix.count < need) {
-      this.overlayGroup.remove(this.reachMesh);
+      this.overlayGroup.remove(this.reachMesh); this.reachMesh.dispose();
       this.reachMesh = new THREE.InstancedMesh(this.reachMesh.geometry, this.reachMesh.material, need);
       this.reachMesh.frustumCulled = false;
       this.overlayGroup.add(this.reachMesh);
@@ -962,7 +968,7 @@ export class Renderer {
   // --------------------------------------------------------------- per-frame
   // Tread marks left on the ground by tracked mechs; they fade over a few seconds
   treadMark(pos, yaw, gauge, scale) {
-    if (!this.markGeo) { this.markGeo = new THREE.PlaneGeometry(1, 1); this.markGeo.rotateX(-Math.PI / 2); this.marks = []; }
+    if (!this.markGeo) { this.markGeo = new THREE.PlaneGeometry(1, 1); this.markGeo.rotateX(-Math.PI / 2); this.markGeo.userData.shared = true; this.marks = []; }
     for (const side of [-1, 1]) {
       const m = new THREE.Mesh(this.markGeo, new THREE.MeshBasicMaterial({ color: '#15130f', transparent: true, opacity: 0.6, depthWrite: false }));
       m.scale.set(0.16 * scale, 1, 0.34 * scale);

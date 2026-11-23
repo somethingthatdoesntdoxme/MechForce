@@ -39,6 +39,27 @@ export function startServer(opts = {}) {
   const webRoot = opts.webRoot;
   const rooms = new Map();
   const log = opts.log || ((...a) => console.log('[mechforce]', ...a));
+  // Limits so a public server can't be flooded. Generous enough that a LAN party or a few
+  // households behind one router never notice them.
+  const limits = {
+    rooms: opts.maxRooms ?? 200,           // games open at once
+    perRoom: opts.maxPerRoom ?? 16,        // players + spectators connected to one game
+    perIp: opts.maxPerIp ?? 24,            // open connections from one address
+    createsPerMin: opts.createsPerMin ?? 10, // new rooms one address may open per minute
+    msgsPerSec: opts.msgsPerSec ?? 40,     // sustained messages per connection (bursts allowed)
+  };
+  const ipConns = new Map();   // ip -> open sockets
+  const ipCreates = new Map(); // ip -> timestamps of recent room creations
+  const clientIp = (req) => {
+    const fwd = opts.trustProxy && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    return fwd || req.socket.remoteAddress || '?';
+  };
+  const mayCreate = (ip) => {
+    const now = Date.now(), recent = (ipCreates.get(ip) || []).filter((t) => now - t < 60000);
+    if (recent.length >= limits.createsPerMin) { ipCreates.set(ip, recent); return false; }
+    recent.push(now); ipCreates.set(ip, recent);
+    return true;
+  };
 
   const info = () => ({ mechforce: true, name, version: VERSION, protocol: PROTOCOL, port, rooms: [...rooms.values()].map((r) => r.summary()) });
 
@@ -112,9 +133,21 @@ export function startServer(opts = {}) {
 
   wss.on('connection', (ws, req) => {
     let room = null, cid = null;
+    const ip = clientIp(req);
+    const fatal = (m) => { try { ws.send(JSON.stringify({ t: 'error', fatal: true, msg: m })); } catch {} ws.close(); };
+    if ((ipConns.get(ip) || 0) >= limits.perIp) { log('too many connections from', ip); return fatal('Too many connections from your network.'); }
+    ipConns.set(ip, (ipConns.get(ip) || 0) + 1);
+    let released = false;
+    const release = () => { if (released) return; released = true; const n = (ipConns.get(ip) || 1) - 1; if (n > 0) ipConns.set(ip, n); else ipConns.delete(ip); };
+    // token bucket: a burst of up to 4x the rate is fine (a whole turn's orders at once)
+    let tokens = limits.msgsPerSec * 4, lastFill = Date.now(), strikes = 0;
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', (data) => {
+      const now = Date.now();
+      tokens = Math.min(limits.msgsPerSec * 4, tokens + (now - lastFill) / 1000 * limits.msgsPerSec); lastFill = now;
+      if (tokens < 1) { if (++strikes > limits.msgsPerSec * 2) { log('flooding, dropped', ip); ws.terminate(); } return; }
+      tokens--;
       let msg;
       try { msg = JSON.parse(String(data)); } catch { return; }
       if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
@@ -128,16 +161,23 @@ export function startServer(opts = {}) {
           ws.send(JSON.stringify({ t: 'error', fatal: true, msg: `Version mismatch: server ${VERSION}, you have ${msg.version || '?'}. Update both apps.` }));
           return ws.close();
         }
-        const code = (msg.room || '').toUpperCase().trim();
-        if (msg.create) room = makeRoom();
+        const code = String(msg.room || '').toUpperCase().trim().slice(0, 12);
+        const newRoom = () => {
+          if (rooms.size >= limits.rooms) { fatal('This server is full right now. Try again in a few minutes.'); return null; }
+          if (!mayCreate(ip)) { fatal('Too many new games from your network. Wait a minute and try again.'); return null; }
+          return makeRoom();
+        };
+        if (msg.create) { room = newRoom(); if (!room) return; }
         else if (code) room = rooms.get(code);
         else {
           // No code: join the one open lobby on this host, or start a fresh one
           const live = [...rooms.values()].filter((r) => !r.game && [...r.clients.values()].some((c) => c.connected));
           if (live.length === 1) room = live[0];
-          else if (live.length === 0) room = makeRoom();
+          else if (live.length === 0) { room = newRoom(); if (!room) return; }
         }
-        if (!room) { ws.send(JSON.stringify({ t: 'error', fatal: true, msg: code ? `Room ${code} not found` : 'Several games are running here — pick one by code.' })); return ws.close(); }
+        if (!room) return fatal(code ? `Room ${code} not found` : 'Several games are running here — pick one by code.');
+        const rejoining = msg.token && [...room.clients.values()].some((c) => c.token === msg.token);
+        if (!rejoining && [...room.clients.values()].filter((c) => c.connected).length >= limits.perRoom) { room = null; return fatal('That game is full.'); }
         // temporarily register before join so welcome can be delivered
         const tmpId = '__pending';
         sockets.set(tmpId, ws);
@@ -152,11 +192,14 @@ export function startServer(opts = {}) {
       room.handle(cid, msg);
     };
     ws.on('close', () => {
+      release();
       if (room && cid) { if (sockets.get(cid) === ws) sockets.delete(cid); room.leave(cid); }
     });
   });
 
   const hb = setInterval(() => {
+    const now = Date.now();
+    for (const [k, ts] of ipCreates) if (!ts.some((t) => now - t < 60000)) ipCreates.delete(k);
     for (const ws of wss.clients) { if (!ws.isAlive) { ws.terminate(); continue; } ws.isAlive = false; try { ws.ping(); } catch {} }
   }, 15000);
 
@@ -207,6 +250,7 @@ if (isMain) {
   const get = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
   const here = typeof __dirname !== 'undefined' ? __dirname : path.dirname(new URL(import.meta.url).pathname);
   const web = get('--web', fs.existsSync(path.join(here, 'web', 'index.html')) ? path.join(here, 'web') : null);
-  startServer({ port: +get('--port', process.env.PORT || DEFAULT_PORT), name: get('--name', os.hostname()), webRoot: web, beacon: !args.includes('--no-beacon') })
+  startServer({ port: +get('--port', process.env.PORT || DEFAULT_PORT), name: get('--name', os.hostname()), webRoot: web, beacon: !args.includes('--no-beacon'),
+    maxRooms: +get('--max-rooms', 200), trustProxy: args.includes('--trust-proxy') })
     .catch((e) => { console.error(e.message); process.exit(1); });
 }

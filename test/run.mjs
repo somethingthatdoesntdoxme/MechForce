@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const TESTS = ['sim.mjs', 'chassis.mjs', 'fog.mjs', 'structures.mjs', 'dfa.mjs', 'pilots.mjs', 'units.mjs', 'delta.mjs', 'ai.mjs',
-  'campaign.mjs', 'replay.mjs', 'missions.mjs', 'melee.mjs', 'teams.mjs', 'custom.mjs', 'four.mjs', 'handheld.cjs', 'perf.mjs'];
+  'campaign.mjs', 'replay.mjs', 'missions.mjs', 'melee.mjs', 'teams.mjs', 'custom.mjs', 'four.mjs', 'limits.mjs', 'handheld.cjs', 'perf.mjs'];
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
