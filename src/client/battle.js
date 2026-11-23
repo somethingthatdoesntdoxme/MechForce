@@ -114,7 +114,7 @@ export class Battle {
     if (!briefing) { this.ix = { mode: 'anim' }; this.r.clearOverlays(); }
     this.render();
     this.r.play(events, view, (e) => this.onEvent(e)).then(() => {
-      if (this.full !== msg.state) return; // newer update queued
+      if (this.full !== msg.state || !this.session) return; // superseded, or the player left mid-animation // newer update queued
       if (this.ix.mode === 'briefing') { this.render(); return; }
       this.refresh(prevSide);
     });

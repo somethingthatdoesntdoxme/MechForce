@@ -1,5 +1,5 @@
 const { chromium } = require('playwright');
-const OUT = process.env.OUT;
+const OUT = process.env.OUT || require('path').join(__dirname, '..', 'shots'); require('fs').mkdirSync(OUT, { recursive: true });
 (async () => {
   const b = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const p = await b.newPage({ viewport: { width: 1280, height: 800 } });

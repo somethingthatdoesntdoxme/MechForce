@@ -15,3 +15,6 @@ const { aiNextCommand } = await import('../src/core/ai.js'); const { applyComman
 let n = 0; while (!g.over && n++ < 3000) { const c = aiNextCommand(g); const r = applyCommand(g, activeSide(g), c); if (!r.ok) applyCommand(g, activeSide(g), { type: 'end', id: c.id }); }
 console.log('game finished:', g.over, 'round', g.round, g.winner.reason);
 room.dispose();
+// the cheating design must be refused (with an error), the legal one kept, and the game must finish
+const lanceOk = msgs.some((m) => m.t === 'error') && g.mechs.some((m) => m.side === 0 && m.custom);
+if (!lanceOk || !g.over) { console.log('FAIL custom designs / game end'); process.exit(1); }

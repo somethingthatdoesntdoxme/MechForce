@@ -136,13 +136,14 @@ export class PeerHostSession {
         if (msg.t !== 'hello') return;
         if (msg.protocol !== PROTOCOL) { conn.send({ t: 'error', fatal: true, msg: `Version mismatch: host has ${VERSION}, you have ${msg.version || '?'}. Update both.` }); setTimeout(() => conn.close(), 300); return; }
         this.pending = conn;
-        cid = this.room.join({ name: msg.name, platform: msg.platform, token: msg.token });
-        this.pending = null;
+        try { cid = this.room.join({ name: msg.name, platform: msg.platform, token: msg.token }); } finally { this.pending = null; }
+        if (!cid) return;
         this.conns.set(cid, conn);
         // welcome + lobby were routed while pending; re-send current state to be safe
         return;
       }
-      this.room.handle(cid, msg);
+      // a bad message from one guest shouldn't break the host's game for everyone
+      try { this.room.handle(cid, msg); } catch (e) { console.warn('[mechforce] message error', e); }
     });
     const gone = () => { if (cid && this.conns.get(cid) === conn) { this.conns.delete(cid); this.room.leave(cid); } };
     conn.on('close', gone);

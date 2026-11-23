@@ -1,7 +1,7 @@
 // The tutorial in the browser: starts from the title menu, coaches each step, finishes.
 // OUT=dir node test/tutorial-ui.cjs
 const { chromium } = require('playwright');
-const OUT = process.env.OUT;
+const OUT = process.env.OUT || require('path').join(__dirname, '..', 'shots'); require('fs').mkdirSync(OUT, { recursive: true });
 let fails = 0;
 const ok = (c, msg) => { if (!c) { fails++; console.log('FAIL', msg); } else console.log('ok  ', msg); };
 (async () => {

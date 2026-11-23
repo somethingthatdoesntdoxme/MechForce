@@ -11,8 +11,20 @@ fs.mkdirSync(path.join(out, 'artifact'), { recursive: true });
 
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 
+// Stylesheets are imported as text and injected at runtime; minify them on the way in.
+const minifyCss = {
+  name: 'minify-css',
+  setup(b) {
+    b.onLoad({ filter: /\.css$/ }, async (args) => {
+      const css = fs.readFileSync(args.path, 'utf8');
+      const out = dev ? css : (await esbuild.transform(css, { loader: 'css', minify: true })).code;
+      return { contents: out, loader: 'text' };
+    });
+  },
+};
+
 const bundle = async (artifact) => (await esbuild.build({
-  entryPoints: ['src/client/main.js'],
+  entryPoints: ['src/client/main.js'], plugins: [minifyCss],
   bundle: true, format: 'iife', minify: !dev, sourcemap: false, write: false, target: ['es2020', 'chrome90', 'safari15'],
   loader: { '.css': 'text', '.woff2': 'dataurl' },
   define: { 'process.env.NODE_ENV': '"production"', __MF_ARTIFACT__: artifact ? 'true' : 'false' },

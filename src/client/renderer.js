@@ -20,14 +20,40 @@ const SANITIZE = {
       gl_FragColor = vec4(rgb, (isnan(c.a) || isinf(c.a)) ? 1.0 : clamp(c.a, 0.0, 1.0));
     }`,
 };
+// Colour grade, applied after tone mapping (display space): contrast, saturation, then a
+// lift (tints the shadows) and gain (tints the highlights). Set per map in buildMap.
+const GRADE = {
+  uniforms: { tDiffuse: { value: null }, lift: { value: new THREE.Vector3() }, gain: { value: new THREE.Vector3(1, 1, 1) }, sat: { value: 1 }, contrast: { value: 1 } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform vec3 lift; uniform vec3 gain; uniform float sat; uniform float contrast; varying vec2 vUv;
+    void main() {
+      vec4 t = texture2D(tDiffuse, vUv);
+      vec3 c = clamp((t.rgb - 0.5) * contrast + 0.5, 0.0, 1.0);
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      c = mix(vec3(l), c, sat);
+      c = clamp(c * gain + lift * (1.0 - c), 0.0, 1.0);
+      gl_FragColor = vec4(c, t.a);
+    }`,
+};
+// Per-map light and grade. exposure applies on every quality setting; the grade needs the
+// post-processing chain (medium and high).
+const LOOK = {
+  temperate: { exposure: 1.0, hemi: 1.05, sun: 1.9, lift: [0.0, 0.012, 0.03], gain: [1.0, 1.0, 0.98], sat: 1.08, contrast: 1.05 },
+  desert: { exposure: 0.95, hemi: 1.05, sun: 1.65, lift: [0.02, 0.01, 0.0], gain: [1.02, 1.0, 0.95], sat: 1.02, contrast: 1.06 },
+  snow: { exposure: 0.88, hemi: 1.0, sun: 1.5, lift: [0.0, 0.01, 0.035], gain: [0.98, 1.0, 1.03], sat: 1.1, contrast: 1.12 },
+  lunar: { exposure: 1.05, hemi: 0.35, sun: 1.9, lift: [0.0, 0.0, 0.02], gain: [1.0, 1.0, 1.02], sat: 0.9, contrast: 1.12 },
+  // volcanic was murky: more exposure and a warm bounce light from below, as if off the lava
+  volcanic: { exposure: 1.3, hemi: 1.35, sun: 1.7, hemiGround: '#6a2a14', lift: [0.045, 0.014, 0.0], gain: [1.05, 0.98, 0.92], sat: 1.1, contrast: 1.0 },
+};
 import { center, DIR_ANGLE, toAxial, fromAxial, neighbor } from '../core/hex.js';
 import { WEAPONS, TERRAIN, UNITS } from '../core/data.js';
 import { view as palView, RING_SEGMENTS, shapeFor } from './palette.js';
 import { totalArmor, maxArmor, operational } from '../core/rules.js';
 import { renderScale, saverOn } from './perf.js';
-import { buildMech, buildItem, triggerWeaponAnim, tickWeaponAnims, rollTracks, buildStructure, buildUnit, skinMerge, BAKED_MAT } from './models.js';
+import { buildMech, buildItem, triggerWeaponAnim, tickWeaponAnims, rollTracks, buildStructure, buildUnit, skinMerge, BAKED_MAT, bakedMat, disposeModel } from './models.js';
 import { sfx } from './audio.js';
 import { input } from './input.js';
+import { rnd, patchNoise, hexAtPoint, liquidMaterial, skyDome } from './terrainfx.js';
 
 const ELEV = 0.42;
 export const topY = (e) => 0.2 + e * ELEV;
@@ -36,11 +62,11 @@ const facingRot = (f) => { const a = DIR_ANGLE[f] * Math.PI / 180; return Math.a
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const THEMES = {
-  temperate: { t: ['#6a8a45', '#55773a', '#3c5b2e', '#857f6c', '#2f6584', '#1f4a68'], side: '#54473a', ground: '#3a4630', fog: '#9fb4bd', sky: '#b9ccd4', hemi: ['#d8ecff', '#4d5b3a'], sun: '#fff1d6', tree: ['#3f6b2c', '#2f5524'], trunk: '#5a4330', rock: '#7d786a', water: '#3a7aa0', lava: false },
-  desert: { t: ['#cfa96c', '#a7a25c', '#7d8443', '#b48a5c', '#3c8597', '#2a6576'], side: '#94714a', ground: '#b08b5c', fog: '#e9d1a6', sky: '#f0dcb4', hemi: ['#fff1d8', '#a07a4c'], sun: '#ffe2b0', tree: ['#7e8a3e', '#5f6b2e'], trunk: '#6b4b2e', rock: '#9c7a52', water: '#3f95a8', lava: false },
-  snow: { t: ['#e4ebf1', '#b7c9bf', '#86a092', '#c3ccd6', '#7aa0bb', '#557d9b'], side: '#909eab', ground: '#c9d4de', fog: '#d6e1ea', sky: '#e3ecf3', hemi: ['#f0f6ff', '#8592a0'], sun: '#ffffff', tree: ['#3d5d4f', '#2d4a3e'], trunk: '#4e4038', rock: '#a9b4bf', water: '#8fb7d0', lava: false },
-  lunar: { t: ['#8e9096', '#8e9096', '#8e9096', '#6f7178', '#55575e', '#45474d'], side: '#4b4d54', ground: '#2b2c31', fog: '#06070c', sky: '#05060a', hemi: ['#c8d0ff', '#1a1a22'], sun: '#f4f6ff', tree: ['#666', '#555'], trunk: '#444', rock: '#5d5f66', water: '#55575e', lava: false, stars: true },
-  volcanic: { t: ['#3e3734', '#4a3f30', '#352d24', '#2c2523', '#ff5a1f', '#ff3d0a'], side: '#25201e', ground: '#1d1715', fog: '#3a1d14', sky: '#2a130d', hemi: ['#ffb08a', '#2a1510'], sun: '#ffc39a', tree: ['#3b3326', '#2b241b'], trunk: '#2a201a', rock: '#3a302c', water: '#ff5a1f', lava: true },
+  temperate: { dust: '#8f8068', zenith: '#6c97bd', t: ['#6a8a45', '#55773a', '#3c5b2e', '#857f6c', '#2f6584', '#1f4a68'], side: '#54473a', ground: '#3a4630', fog: '#9fb4bd', sky: '#b9ccd4', hemi: ['#d8ecff', '#4d5b3a'], sun: '#fff1d6', tree: ['#3f6b2c', '#2f5524'], trunk: '#5a4330', rock: '#7d786a', water: '#3a7aa0', lava: false },
+  desert: { dust: '#d8b98a', zenith: '#d7a86c', t: ['#cfa96c', '#a7a25c', '#7d8443', '#b48a5c', '#3c8597', '#2a6576'], side: '#94714a', ground: '#b08b5c', fog: '#e9d1a6', sky: '#f0dcb4', hemi: ['#fff1d8', '#a07a4c'], sun: '#ffe2b0', tree: ['#7e8a3e', '#5f6b2e'], trunk: '#6b4b2e', rock: '#9c7a52', water: '#3f95a8', lava: false },
+  snow: { dust: '#eef3f8', zenith: '#9fbbd3', t: ['#e4ebf1', '#b7c9bf', '#86a092', '#c3ccd6', '#7aa0bb', '#557d9b'], side: '#909eab', ground: '#c9d4de', fog: '#d6e1ea', sky: '#e3ecf3', hemi: ['#f0f6ff', '#8592a0'], sun: '#ffffff', tree: ['#3d5d4f', '#2d4a3e'], trunk: '#4e4038', rock: '#a9b4bf', water: '#8fb7d0', lava: false },
+  lunar: { dust: '#a9abb2', zenith: '#000000', t: ['#8e9096', '#8e9096', '#8e9096', '#6f7178', '#55575e', '#45474d'], side: '#4b4d54', ground: '#2b2c31', fog: '#06070c', sky: '#05060a', hemi: ['#c8d0ff', '#1a1a22'], sun: '#f4f6ff', tree: ['#666', '#555'], trunk: '#444', rock: '#5d5f66', water: '#55575e', lava: false, stars: true },
+  volcanic: { dust: '#5e4a3e', zenith: '#100604', t: ['#3e3734', '#4a3f30', '#352d24', '#2c2523', '#ff5a1f', '#ff3d0a'], side: '#25201e', ground: '#1d1715', fog: '#3a1d14', sky: '#2a130d', hemi: ['#ffb08a', '#2a1510'], sun: '#ffc39a', tree: ['#3b3326', '#2b241b'], trunk: '#2a201a', rock: '#3a302c', water: '#ff5a1f', lava: true },
 };
 
 function radialTexture() {
@@ -88,7 +114,7 @@ export class Renderer {
     this.mechs = new Map();
     this.particles = [];
     this.beams = [];
-    this.tex = radialTexture();
+    this.tex = radialTexture(); this.tex.userData.shared = true;
     this.raycaster = new THREE.Raycaster();
     this.time = 0;
     this.queue = Promise.resolve();
@@ -114,14 +140,21 @@ export class Renderer {
     const sm = q === 'high' && !saverOn() ? 2048 : 1024;
     this.sun.shadow.mapSize.set(sm, sm);
     if (this.sun.shadow.map) { this.sun.shadow.map.dispose(); this.sun.shadow.map = null; }
-    if (q !== 'low') {
+    // The bloom chain owns a dozen render targets: build it once and keep it (this used to
+    // make a fresh one, leaking the old, every time settings were saved or power changed)
+    const dropComposer = () => { if (!this.composer) return; for (const ps of this.composer.passes) ps.dispose?.(); this.composer.dispose(); this.composer = null; };
+    if (q === 'low') dropComposer();
+    else if (!this.composer) {
       this.composer = new EffectComposer(this.gl);
       this.composer.addPass(new RenderPass(this.scene, this.camera));
       this.composer.addPass(new ShaderPass(SANITIZE));
       this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.4, 0.4, 0.92);
       this.composer.addPass(this.bloom);
       this.composer.addPass(new OutputPass());
-    } else this.composer = null;
+      this.grade = new ShaderPass(GRADE);
+      this.composer.addPass(this.grade);
+      if (this.look) this.applyLook(this.look);
+    }
     this.resize();
     this.gl.compile(this.scene, this.camera);
   }
@@ -141,49 +174,86 @@ export class Renderer {
   // them without touching mechs, structures or effects.
   buildTerrain(map) {
     const th = this.theme;
-    if (this.terrainGroup) { this.world.remove(this.terrainGroup); this.terrainGroup.traverse((o) => { if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose(); }); }
+    if (this.terrainGroup) { this.world.remove(this.terrainGroup); disposeModel(this.terrainGroup); }
     const tg = this.terrainGroup = new THREE.Group();
     this.world.add(tg);
-    const rnd = (i) => { const x = Math.sin(i * 12.9898) * 43758.5453; return x - Math.floor(x); };
     const { w, h } = map;
     const pos = [], col = [], idx = [];
     const lines = [];
-    const tmpC = new THREE.Color();
+    const tmpC = new THREE.Color(), sideC = new THREE.Color(), capC = new THREE.Color(), earth = new THREE.Color(th.side);
     const corners = [];
     for (let i = 0; i < 6; i++) { const a = (60 * i - 30) * Math.PI / 180; corners.push([Math.cos(a), Math.sin(a)]); }
     let vi = 0;
-    const waterPos = [], waterIdx = [];
+    const waterPos = [], waterIdx = [], waterShore = [];
     let wvi = 0;
+    const aoTmp = [1, 1, 1, 1, 1, 1];
+    const tileAt = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? -1 : map.t[y * w + x]);
+    const isLiquid = (t) => t === 4 || t === 5;
+    const pushCol = (c, k = 1) => col.push(c.r * k, c.g * k, c.b * k);
+    // One hex column: a top with a small bevelled lip (so tiles read as solid blocks with soft
+    // edges rather than flat cards), then sides with a band of the top colour (the grass or
+    // snow line) over earth that darkens toward the bottom.
+    const BEVEL = 0.05, RIN = 0.86, R = 0.995, CAP = 0.1;
+    // `ao` (optional, per corner): darkening where a taller neighbour crowds the tile, baked
+    // into the vertex colours, so the shading in nooks costs nothing at draw time
+    const column = (cx, cz, top, base, topCol, sideCol, ao) => {
+      const lip = top - BEVEL;
+      pos.push(cx, top, cz); pushCol(topCol, ao ? 1 - (1 - (ao[0] + ao[1] + ao[2] + ao[3] + ao[4] + ao[5]) / 6) * 0.5 : 1);
+      const ci = vi++;
+      for (let k = 0; k < 6; k++) { pos.push(cx + corners[k][0] * RIN, top, cz + corners[k][1] * RIN); pushCol(topCol, 0.97 * (ao ? ao[k] : 1)); vi++; }
+      for (let k = 0; k < 6; k++) idx.push(ci, ci + 1 + ((k + 1) % 6), ci + 1 + k);
+      // bevel ring
+      const bi = vi;
+      for (let k = 0; k < 6; k++) { pos.push(cx + corners[k][0] * R, lip, cz + corners[k][1] * R); pushCol(topCol, 0.86 * (ao ? ao[k] : 1)); vi++; }
+      for (let k = 0; k < 6; k++) {
+        const i0 = ci + 1 + k, i1 = ci + 1 + ((k + 1) % 6), o0 = bi + k, o1 = bi + ((k + 1) % 6);
+        idx.push(i0, i1, o1, i0, o1, o0);
+      }
+      // sides: cap band, then earth
+      const capBottom = Math.max(base, lip - CAP);
+      capC.copy(topCol).multiplyScalar(0.72);
+      for (let k = 0; k < 6; k++) {
+        const a = corners[k], b = corners[(k + 1) % 6];
+        const ax = cx + a[0] * R, az = cz + a[1] * R, bx = cx + b[0] * R, bz = cz + b[1] * R;
+        let s0 = vi;
+        pos.push(ax, lip, az, bx, lip, bz, bx, capBottom, bz, ax, capBottom, az);
+        pushCol(capC); pushCol(capC); pushCol(capC, 0.9); pushCol(capC, 0.9);
+        vi += 4; idx.push(s0, s0 + 1, s0 + 2, s0, s0 + 2, s0 + 3);
+        s0 = vi;
+        pos.push(ax, capBottom, az, bx, capBottom, bz, bx, base, bz, ax, base, az);
+        pushCol(sideCol); pushCol(sideCol); pushCol(sideCol, 0.5); pushCol(sideCol, 0.5);
+        vi += 4; idx.push(s0, s0 + 1, s0 + 2, s0, s0 + 2, s0 + 3);
+      }
+    };
+    // tile colour: theme colour, nudged by broad patches, a little per-tile jitter and height
+    const tileColour = (out, t, x, y, e) => {
+      out.set(th.t[t]);
+      if (!isLiquid(t)) {
+        const n = patchNoise(x + 40, y + 40, 4.5, 1) - 0.5, n2 = patchNoise(x + 9, y + 3, 2.2, 7) - 0.5;
+        out.offsetHSL(n2 * 0.025, n * 0.1, n * 0.07 + (rnd(x * 31 + y * 17) - 0.5) * 0.045 + e * 0.025);
+      }
+      return out;
+    };
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const t = map.t[y * w + x], e = map.e[y * w + x];
       const c = center(x, y);
-      const isWater = t === 4 || t === 5;
+      const isWater = isLiquid(t);
       const top = isWater ? topY(0) - (t === 5 ? 0.3 : 0.18) : topY(e);
-      const base = -0.6;
-      tmpC.set(th.t[t]);
-      const jitter = (rnd(x * 31 + y * 17) - 0.5) * 0.08;
-      tmpC.offsetHSL(0, 0, jitter + e * 0.025);
-      const side = new THREE.Color(th.side).offsetHSL(0, 0, e * 0.02 - 0.02);
-      const R = 0.995;
-      // top centre + ring
-      pos.push(c.px, top, c.py); col.push(tmpC.r, tmpC.g, tmpC.b);
-      const ci = vi++;
+      tileColour(tmpC, t, x, y, e);
+      // earth sides pick up a little of the tile colour so cliffs don't read as black voids
+      sideC.copy(earth).lerp(tmpC, 0.22).offsetHSL(0, 0, 0.03 + e * 0.02);
+      // corner occlusion from the two neighbours sharing each corner
       for (let k = 0; k < 6; k++) {
-        pos.push(c.px + corners[k][0] * R, top, c.py + corners[k][1] * R);
-        const edgeShade = 0.9;
-        col.push(tmpC.r * edgeShade, tmpC.g * edgeShade, tmpC.b * edgeShade);
-        vi++;
+        let occ = 0;
+        for (const da of [-30, 30]) {
+          const a = (60 * k - 30 + da) * Math.PI / 180, nb = hexAtPoint(c.px + Math.cos(a) * 1.732, c.py + Math.sin(a) * 1.732);
+          const nt = tileAt(nb.x, nb.y);
+          if (nt < 0 || isLiquid(nt)) continue;
+          occ = Math.max(occ, topY(map.e[nb.y * w + nb.x]) - top);
+        }
+        aoTmp[k] = occ > 0.05 ? 1 - Math.min(0.32, occ * 0.3) : 1;
       }
-      for (let k = 0; k < 6; k++) idx.push(ci, ci + 1 + ((k + 1) % 6), ci + 1 + k);
-      // sides
-      for (let k = 0; k < 6; k++) {
-        const a = corners[k], b = corners[(k + 1) % 6];
-        const s0 = vi;
-        pos.push(c.px + a[0] * R, top, c.py + a[1] * R, c.px + b[0] * R, top, c.py + b[1] * R, c.px + b[0] * R, base, c.py + b[1] * R, c.px + a[0] * R, base, c.py + a[1] * R);
-        for (let q = 0; q < 4; q++) { const f = q < 2 ? 1 : 0.55; col.push(side.r * f, side.g * f, side.b * f); }
-        vi += 4;
-        idx.push(s0, s0 + 1, s0 + 2, s0, s0 + 2, s0 + 3);
-      }
+      column(c.px, c.py, top, -0.6, tmpC, sideC, aoTmp);
       // grid outline
       for (let k = 0; k < 6; k++) {
         const a = corners[k], b = corners[(k + 1) % 6];
@@ -191,27 +261,77 @@ export class Renderer {
       }
       if (isWater) {
         const wy = topY(0) - 0.06;
-        waterPos.push(c.px, wy, c.py);
+        waterPos.push(c.px, wy, c.py); waterShore.push(0);
         const w0 = wvi++;
-        for (let k = 0; k < 6; k++) { waterPos.push(c.px + corners[k][0], wy, c.py + corners[k][1]); wvi++; }
+        for (let k = 0; k < 6; k++) {
+          const px = c.px + corners[k][0], pz = c.py + corners[k][1];
+          waterPos.push(px, wy, pz);
+          // a corner is on the shore if either neighbour sharing it is dry land (or off the map)
+          let shore = 0;
+          for (const da of [-30, 30]) {
+            const a = (60 * k - 30 + da) * Math.PI / 180, nb = hexAtPoint(c.px + Math.cos(a) * 1.732, c.py + Math.sin(a) * 1.732);
+            if (!isLiquid(tileAt(nb.x, nb.y))) shore = 1;
+          }
+          waterShore.push(shore); wvi++;
+        }
         for (let k = 0; k < 6; k++) waterIdx.push(w0, w0 + 1 + ((k + 1) % 6), w0 + 1 + k);
       }
     }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-    g.setIndex(idx);
-    g.computeVertexNormals();
-    const terrain = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.02, flatShading: true }));
+    const mapIdxEnd = idx.length;
+    // Scenery beyond the map edge: a few rings of lower, darker, unplayable hexes (some wooded)
+    // so the battlefield sits in a landscape instead of floating over a flat plane.
+    const rings = this.quality === 'low' ? 3 : 5;
+    const decorTrees = [];
+    for (let y = -rings; y < h + rings; y++) for (let x = -rings; x < w + rings; x++) {
+      if (x >= 0 && y >= 0 && x < w && y < h) continue;
+      const d = Math.max(-x, -y, x - (w - 1), y - (h - 1));
+      const c = center(x, y);
+      const n = patchNoise(x + 40, y + 40, 4.5, 1);
+      // nearest map tile's height, falling away with distance, plus some rolling ground
+      const nx = Math.max(0, Math.min(w - 1, x)), ny = Math.max(0, Math.min(h - 1, y));
+      const edgeE = isLiquid(map.t[ny * w + nx]) ? 0 : map.e[ny * w + nx];
+      const e = Math.max(0, Math.round(edgeE * 0.6 + (n - 0.35) * 3 - d * 0.35));
+      const lava = map.theme === 'volcanic';
+      const t = lava ? (n > 0.6 ? 2 : n > 0.4 ? 0 : 3) : n > 0.62 ? 2 : n > 0.5 ? 1 : (rnd(x * 13 + y * 7) > 0.85 ? 3 : 0);
+      tileColour(tmpC, t, x, y, e);
+      // clearly off the board: a step lower and noticeably darker, more so further out
+      // (multiplying rather than shifting lightness so bright snow and moon dust darken too)
+      tmpC.offsetHSL(0, -0.1, 0).multiplyScalar(Math.max(0.45, 0.7 - d * 0.05));
+      sideC.copy(earth).lerp(tmpC, 0.22).multiplyScalar(0.8);
+      const top = topY(e) - 0.5;
+      column(c.px, c.py, top, -0.6, tmpC, sideC);
+      if ((t === 1 || t === 2) && map.theme !== 'lunar') {
+        const nT = this.quality === 'low' ? 1 : t === 2 ? 3 : 2;
+        for (let i = 0; i < nT; i++) {
+          const r = Math.sqrt(rnd(x * 7 + y * 13 + i * 3.1)) * 0.68, a = rnd(x * 5 + y * 11 + i * 7.7) * Math.PI * 2;
+          decorTrees.push({ x: c.px + Math.cos(a) * r, z: c.py + Math.sin(a) * r, y: top, s: 0.7 + rnd(x + y * 3 + i) * 0.6, dark: t === 2 });
+        }
+      }
+    }
+    // map tiles and scenery share one vertex buffer but are separate meshes: clicks only ever
+    // land on the map, and only the map casts shadows (flat shading needs no normals)
+    const posAttr = new THREE.Float32BufferAttribute(pos, 3), colAttr = new THREE.Float32BufferAttribute(col, 3);
+    const terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.02, flatShading: true });
+    const mapGeo = new THREE.BufferGeometry();
+    mapGeo.setAttribute('position', posAttr); mapGeo.setAttribute('color', colAttr);
+    mapGeo.setIndex(idx.slice(0, mapIdxEnd));
+    const terrain = new THREE.Mesh(mapGeo, terrainMat);
     terrain.receiveShadow = true; terrain.castShadow = true;
     this.terrain = terrain;
     tg.add(terrain);
+    const sceneryGeo = new THREE.BufferGeometry();
+    sceneryGeo.setAttribute('position', posAttr); sceneryGeo.setAttribute('color', colAttr);
+    sceneryGeo.setIndex(idx.slice(mapIdxEnd));
+    const scenery = new THREE.Mesh(sceneryGeo, terrainMat);
+    scenery.receiveShadow = true;
+    tg.add(scenery);
     const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.Float32BufferAttribute(lines, 3));
     tg.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: map.theme === 'snow' ? '#5a6878' : '#000000', transparent: true, opacity: map.theme === 'snow' ? 0.22 : 0.16 })));
     if (waterPos.length) {
-      const wg = new THREE.BufferGeometry(); wg.setAttribute('position', new THREE.Float32BufferAttribute(waterPos, 3)); wg.setIndex(waterIdx); wg.computeVertexNormals();
-      this.waterMat = new THREE.MeshStandardMaterial({ color: th.water, transparent: !th.lava, opacity: th.lava ? 1 : 0.72, roughness: th.lava ? 0.7 : 0.3, metalness: th.lava ? 0 : 0.1,
-        emissive: th.lava ? new THREE.Color('#ff3c00') : new THREE.Color('#0a2a3a'), emissiveIntensity: th.lava ? 1.3 : 0.3 });
+      const wg = new THREE.BufferGeometry(); wg.setAttribute('position', new THREE.Float32BufferAttribute(waterPos, 3));
+      wg.setAttribute('shore', new THREE.Float32BufferAttribute(waterShore, 1)); wg.setIndex(waterIdx); wg.computeVertexNormals();
+      this.liquidU = this.liquidU || { uTime: { value: 0 } };
+      this.waterMat = liquidMaterial(th, th.lava, this.liquidU);
       tg.add(new THREE.Mesh(wg, this.waterMat));
     } else this.waterMat = null;
     // ground skirt
@@ -238,20 +358,34 @@ export class Renderer {
       }
     }
     const lunar = map.theme === 'lunar';
-    if (trees.length && !lunar) {
-      const cone = new THREE.ConeGeometry(0.22, 0.75, 6); cone.translate(0, 0.62, 0);
-      const trunk = new THREE.CylinderGeometry(0.04, 0.05, 0.3, 5); trunk.translate(0, 0.15, 0);
-      const im = new THREE.InstancedMesh(cone, new THREE.MeshStandardMaterial({ roughness: 0.85, flatShading: true }), trees.length);
-      const it = new THREE.InstancedMesh(trunk, new THREE.MeshStandardMaterial({ color: th.trunk, roughness: 1 }), trees.length);
-      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3();
-      trees.forEach((tr, i) => {
-        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), tr.x * 3); sc.set(tr.s, tr.s, tr.s); p.set(tr.x, tr.y, tr.z);
-        m4.compose(p, q, sc); im.setMatrixAt(i, m4); it.setMatrixAt(i, m4);
-        im.setColorAt(i, new THREE.Color(tr.dark ? th.tree[1] : th.tree[0]).offsetHSL(0, 0, (rnd(i) - 0.5) * 0.08));
+    // trees on the board (shadows on high quality) and off it (no shadows, no trunks, darker
+    // to match the scenery): one instanced mesh each, so thousands of trees cost a few draws
+    const cone = new THREE.ConeGeometry(0.22, 0.75, 6); cone.translate(0, 0.62, 0);
+    const addTrees = (list, onBoard) => {
+      if (!list.length || lunar) return;
+      const im = new THREE.InstancedMesh(cone, new THREE.MeshStandardMaterial({ roughness: 0.85, flatShading: true }), list.length);
+      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0), tc = new THREE.Color();
+      let it = null;
+      if (onBoard) {
+        const trunk = new THREE.CylinderGeometry(0.04, 0.05, 0.3, 5); trunk.translate(0, 0.15, 0);
+        it = new THREE.InstancedMesh(trunk, new THREE.MeshStandardMaterial({ color: th.trunk, roughness: 1 }), list.length);
+      }
+      list.forEach((tr, i) => {
+        q.setFromAxisAngle(up, tr.x * 3); sc.set(tr.s, tr.s, tr.s); p.set(tr.x, tr.y, tr.z);
+        m4.compose(p, q, sc); im.setMatrixAt(i, m4); if (it) it.setMatrixAt(i, m4);
+        tc.set(tr.dark ? th.tree[1] : th.tree[0]).offsetHSL(0, 0, (rnd(i) - 0.5) * 0.08);
+        if (!onBoard) tc.multiplyScalar(0.7);
+        im.setColorAt(i, tc);
       });
-      im.castShadow = this.quality === 'high'; im.receiveShadow = true; it.castShadow = this.quality === 'high'; im.userData.tree = true; it.userData.tree = true;
-      tg.add(im, it);
-    }
+      im.receiveShadow = true;
+      if (onBoard) {
+        im.castShadow = it.castShadow = this.quality === 'high';
+        im.userData.tree = it.userData.tree = true;
+        tg.add(im, it);
+      } else tg.add(im);
+    };
+    addTrees(trees, true);
+    addTrees(decorTrees, false);
     if (rocks.length) {
       const rg = new THREE.DodecahedronGeometry(1, 0);
       const rm = new THREE.InstancedMesh(rg, new THREE.MeshStandardMaterial({ color: th.rock, roughness: 0.95, flatShading: true }), rocks.length);
@@ -275,17 +409,18 @@ export class Renderer {
   buildMap(map) {
     this.gen = (this.gen || 0) + 1;
     this.map = map;
+    // free the old battle's models, terrain and effects before dropping them (shared pieces stay)
+    disposeModel(this.world);
     this.world.clear();
     this.marks = this.marks ? [] : this.marks;
     const th = THEMES[map.theme] || THEMES.temperate;
     this.theme = th;
-    this.scene.background = new THREE.Color(th.sky);
+    this.scene.background = new THREE.Color(th.fog);
+    // distance haze: its range follows the camera (see updateCamera) so the board stays crisp
+    // while the scenery and ground beyond fade into the sky
     this.scene.fog = new THREE.Fog(th.fog, 40, 110);
-    this.hemi.color.set(th.hemi[0]); this.hemi.groundColor.set(th.hemi[1]);
-    // a softer sun and more sky light: bright enough to read, without glints off water and metal
-    this.hemi.intensity = map.theme === 'lunar' ? 0.35 : 1.05;
     this.sun.color.set(th.sun);
-    this.sun.intensity = { volcanic: 1.4, snow: 1.5, desert: 1.65 }[map.theme] ?? 1.9;
+    this.applyLook(LOOK[map.theme] || LOOK.temperate);
     this.buildTerrain(map);
     const { w, h } = map;
     const cx = (this.bounds.x0 + this.bounds.x1) / 2, cz = (this.bounds.z0 + this.bounds.z1) / 2;
@@ -297,6 +432,8 @@ export class Renderer {
     sc.left = -span; sc.right = span; sc.top = span; sc.bottom = -span; sc.near = 1; sc.far = 80; sc.updateProjectionMatrix();
     this.cam.want.set(cx, 0, cz); this.cam.target.copy(this.cam.want);
     this.mapCenter = new THREE.Vector3(cx, 0, cz);
+    this.mapSpan = Math.hypot(this.bounds.x1 - this.bounds.x0, this.bounds.z1 - this.bounds.z0) / 2;
+    const dome = skyDome(th.fog, th.zenith); dome.position.set(cx, 0, cz); this.world.add(dome);
     // edge markers group (mission exits)
     this.edgeGroup = new THREE.Group(); this.world.add(this.edgeGroup);
     for (const m of this.mechs.values()) { this.fxGroup.remove(m.smoke); }
@@ -312,13 +449,27 @@ export class Renderer {
     this.itemObj = null;
   }
 
+  // Light levels and colour grade for the current map
+  applyLook(look) {
+    this.look = look;
+    const th = this.theme || THEMES.temperate;
+    // a softer sun and more sky light: bright enough to read, without glints off water and metal
+    this.hemi.color.set(th.hemi[0]); this.hemi.groundColor.set(look.hemiGround || th.hemi[1]);
+    this.hemi.intensity = look.hemi; this.sun.intensity = look.sun;
+    this.gl.toneMappingExposure = look.exposure;
+    if (this.grade) {
+      const u = this.grade.uniforms;
+      u.lift.value.set(...look.lift); u.gain.value.set(...look.gain); u.sat.value = look.sat; u.contrast.value = look.contrast;
+    }
+  }
+
   tileTop(x, y) {
     const t = this.map.t[y * this.map.w + x];
     return t === 4 ? topY(0) - 0.35 : t === 5 ? topY(0) - 0.6 : topY(this.map.e[y * this.map.w + x]);
   }
 
   setExitEdges(edges) {
-    this.edgeGroup.clear();
+    disposeModel(this.edgeGroup); this.edgeGroup.clear();
     if (!edges || !edges.length) return;
     const geo = new THREE.CircleGeometry(0.9, 6); geo.rotateX(-Math.PI / 2); geo.rotateY(Math.PI / 6);
     for (const { x: ex, color } of edges) {
@@ -343,6 +494,9 @@ export class Renderer {
         const color = state.sides[m.side].color;
         const model = buildMech({ design: m.design, tons: m.tons, cls: m.cls, weapons: m.weapons, jump: m.jumpBase, body: m.body, mot: m.mot }, color);
         skinMerge(model.root);
+        // its own copy of the baked material, so its edges can glow in its side's colour
+        const rimMat = bakedMat(0x000000); rimMat.userData.team = new THREE.Color(color);
+        model.root.traverse((o) => { if (o.isMesh && o.material === BAKED_MAT) o.material = rimMat; });
         // colour-blind mode: each side's ring has its own shape (hexagon, triangle, square, octagon)
         const seg = palView.shapes ? RING_SEGMENTS[m.side % 4] : 6;
         const ring = new THREE.Mesh(new THREE.RingGeometry(seg === 3 ? 0.55 : 0.62, seg === 3 ? 0.72 : 0.74, seg), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false }));
@@ -354,7 +508,7 @@ export class Renderer {
         label.style.setProperty('--side', color);
         label.innerHTML = `${shapeFor(m.side) ? `<em class="shape">${shapeFor(m.side)}</em>` : ''}<b></b><i><s class="arm"></s></i><i class="h"><s class="heat"></s></i>`;
         this.labelLayer.appendChild(label);
-        v = { id: m.id, model, ring, label, prone: false, dead: false, walk: 0, torsoYaw: 0, wantYaw: 0, smoke: null, color };
+        v = { id: m.id, model, ring, label, prone: false, dead: false, walk: 0, torsoYaw: 0, wantYaw: 0, smoke: null, color, rimMat };
         this.mechs.set(m.id, v);
         this.mechGroup.add(model.root);
       }
@@ -362,7 +516,7 @@ export class Renderer {
       if (!v.animating) this.placeMech(v, m);
       this.updateMechLook(v, m);
     }
-    for (const [id, v] of this.mechs) if (!seen.has(id)) { this.mechGroup.remove(v.model.root); v.label.remove(); if (v.ghost) this.world.remove(v.ghost); this.mechs.delete(id); }
+    for (const [id, v] of this.mechs) if (!seen.has(id)) { this.mechGroup.remove(v.model.root); disposeModel(v.model); v.label.remove(); if (v.ghost) { this.world.remove(v.ghost); disposeModel(v.ghost); } this.mechs.delete(id); }
     // item
     const it = state.item;
     if (it && !it.gone) {
@@ -402,7 +556,7 @@ export class Renderer {
       sv.model.root.rotation.y = facingRot(s.f || 0);
       sv.model.root.visible = !s.dead;
     }
-    for (const [id, sv] of this.structs) if (!seen.has(id)) { this.structGroup.remove(sv.model.root); this.structs.delete(id); }
+    for (const [id, sv] of this.structs) if (!seen.has(id)) { this.structGroup.remove(sv.model.root); disposeModel(sv.model); this.structs.delete(id); }
   }
 
   // Infantry and vehicles. Views look like structure views ('u' + id), so aiming and firing
@@ -432,7 +586,7 @@ export class Renderer {
       uv.model.root.visible = !u.dead && !u.hidden && u.x >= 0;
       this.unitLosses(uv);
     }
-    for (const [id, uv] of this.units) if (!seen.has(id)) { this.unitGroup.remove(uv.model.root); this.units.delete(id); }
+    for (const [id, uv] of this.units) if (!seen.has(id)) { this.unitGroup.remove(uv.model.root); disposeModel(uv.model); this.units.delete(id); }
   }
   unitY(u) { const t = this.map.t[u.y * this.map.w + u.x]; return t >= 4 ? topY(0) - 0.04 : this.tileTop(u.x, u.y); }
   unitLosses(uv) {
@@ -465,7 +619,7 @@ export class Renderer {
   // Fire and smoke: flickering flames over burning hexes, smoke drifting with the wind
   setEnvironment(state) {
     if (!this.envGroup || !this.map) return;
-    this.envGroup.clear();
+    disposeModel(this.envGroup); this.envGroup.clear();
     this.fireFx = []; this.smokeFx = [];
     const { w } = this.map;
     const windA = state.wind !== undefined ? DIR_ANGLE[state.wind] * Math.PI / 180 : 0;
@@ -538,7 +692,11 @@ export class Renderer {
         const src = o.material;
         o.material = src.clone(); o.material.color.multiplyScalar(0.25); if (o.material.emissive) o.material.emissiveIntensity = 0;
         // the baked material's shader hooks don't survive clone()
-        if (src === BAKED_MAT) { o.material.onBeforeCompile = src.onBeforeCompile; o.material.customProgramCacheKey = () => 'baked-v1-wreck'; }
+        if (src.userData.baked) {
+          o.material.onBeforeCompile = src.onBeforeCompile; o.material.customProgramCacheKey = src.customProgramCacheKey;
+          o.material.userData.rimU = { value: new THREE.Color(0, 0, 0) }; // wrecks don't glow
+          if (!src.userData.shared) src.dispose();
+        }
       });
       mdl.body.rotation.x = 0.5; mdl.body.rotation.z = 0.35; mdl.body.position.y = -mdl.height * 0.3;
       v.ring.visible = false;
@@ -554,7 +712,8 @@ export class Renderer {
       mdl.arms.forEach((a) => { a.sh.visible = !m.locGone[a.loc]; if (m.locGone[a.loc]) a.sh.scale.setScalar(0.0001); });
       mdl.legs.forEach((l) => { l.hip.scale.y = m.locGone[l.loc] ? 0.35 : 1; });
     }
-    v.damaged = !dead && totalArmor(m) / maxArmor(m) < 0.5;
+    v.armorFrac = totalArmor(m) / maxArmor(m);
+    v.damaged = !dead && v.armorFrac < 0.6;
     v.label.classList.toggle('dead', dead);
     v.label.querySelector('b').textContent = m.design;
     v.label.querySelector('.arm').style.width = (100 * totalArmor(m) / maxArmor(m)).toFixed(0) + '%';
@@ -595,7 +754,7 @@ export class Renderer {
     if (!this.map) return;
     const need = this.map.w * this.map.h;
     if (this.reachMesh.instanceMatrix.count < need) {
-      this.overlayGroup.remove(this.reachMesh);
+      this.overlayGroup.remove(this.reachMesh); this.reachMesh.dispose();
       this.reachMesh = new THREE.InstancedMesh(this.reachMesh.geometry, this.reachMesh.material, need);
       this.reachMesh.frustumCulled = false;
       this.overlayGroup.add(this.reachMesh);
@@ -709,6 +868,11 @@ export class Renderer {
     const off = new THREE.Vector3(Math.sin(c.yaw) * Math.cos(c.pitch), Math.sin(c.pitch), Math.cos(c.yaw) * Math.cos(c.pitch)).multiplyScalar(c.dist);
     this.camera.position.copy(c.target).add(off);
     this.camera.lookAt(c.target);
+    if (this.scene.fog && this.mapSpan) {
+      const f = this.scene.fog;
+      f.near = c.dist + this.mapSpan * 0.9;
+      f.far = f.near + 26 + this.mapSpan * 0.5;
+    }
   }
 
   // Smooth 60° turns from the on-screen buttons
@@ -759,7 +923,7 @@ export class Renderer {
 
   onScreenPos(pos, margin = 60) {
     const rect = this.canvas.getBoundingClientRect();
-    const s = this.project(pos.clone());
+    const s = this.project(pos, rect);
     return !s.behind && s.x > rect.left + margin && s.x < rect.right - margin && s.y > rect.top + margin && s.y < rect.bottom - margin;
   }
   onScreen(id, margin = 40) {
@@ -767,7 +931,7 @@ export class Renderer {
     if (!m) return true;
     const rect = this.canvas.getBoundingClientRect();
     const q = m.model.root.position.clone(); q.y += m.model.height * 0.6;
-    const s = this.project(q);
+    const s = this.project(q, rect);
     return !s.behind && s.x > rect.left + margin && s.x < rect.right - margin && s.y > rect.top + margin && s.y < rect.bottom - margin;
   }
   async settleFraming(a, b) {
@@ -849,28 +1013,43 @@ export class Renderer {
     return o;
   }
 
-  project(vec) {
-    const v = vec.clone().project(this.camera);
-    const r = this.canvas.getBoundingClientRect();
+  // Pass `r` (the canvas rect) when projecting many points in a frame: reading the rect
+  // after writing label styles forces the browser to redo layout, once per mech per frame.
+  project(vec, r = this.canvas.getBoundingClientRect()) {
+    const v = (this._pv || (this._pv = new THREE.Vector3())).copy(vec).project(this.camera);
     return { x: (v.x + 1) / 2 * r.width + r.left, y: (1 - v.y) / 2 * r.height + r.top, behind: v.z > 1 };
   }
 
   // --------------------------------------------------------------- particles & effects
+  // Particle sprites are recycled rather than built and thrown away: an explosion alone used
+  // to make ~30 materials that were garbage half a second later.
+  takeSprite(color, normal, opacity = 1) {
+    const s = (this.spritePool || (this.spritePool = [])).pop() ||
+      new THREE.Sprite(new THREE.SpriteMaterial({ map: this.tex, transparent: true, depthWrite: false }));
+    const m = s.material;
+    m.color.set(color); m.opacity = opacity;
+    m.blending = normal ? THREE.NormalBlending : THREE.AdditiveBlending;
+    s.position.set(0, 0, 0); s.scale.setScalar(1); s.visible = true;
+    this.fxGroup.add(s);
+    return s;
+  }
+  releaseSprite(s) {
+    this.fxGroup.remove(s);
+    if (this.spritePool.length < 600) this.spritePool.push(s); else s.material.dispose();
+  }
   spawn(pos, opts) {
     const n = opts.n || 1;
     const cap = this.quality === 'low' ? 160 : 500;
     for (let i = 0; i < n; i++) {
-      if (this.particles.length > cap) { const old = this.particles.shift(); this.fxGroup.remove(old.s); }
-      const mat = new THREE.SpriteMaterial({ map: this.tex, color: opts.color || '#ffaa33', transparent: true, blending: opts.normal ? THREE.NormalBlending : THREE.AdditiveBlending, depthWrite: false, opacity: opts.opacity ?? 1 });
-      const s = new THREE.Sprite(mat);
+      if (this.particles.length > cap) this.releaseSprite(this.particles.shift().s);
+      const s = this.takeSprite(opts.color || '#ffaa33', opts.normal, opts.opacity ?? 1);
       s.position.copy(pos);
-      if (opts.spread) s.position.add(new THREE.Vector3((Math.random() - 0.5) * opts.spread, (Math.random() - 0.5) * opts.spread, (Math.random() - 0.5) * opts.spread));
+      if (opts.spread) s.position.x += (Math.random() - 0.5) * opts.spread, s.position.y += (Math.random() - 0.5) * opts.spread, s.position.z += (Math.random() - 0.5) * opts.spread;
       const size = (opts.size || 0.4) * (0.7 + Math.random() * 0.6);
       s.scale.setScalar(size);
       const sp = opts.speed ?? 2;
       const vel = new THREE.Vector3((Math.random() - 0.5) * sp, Math.random() * sp * (opts.up ?? 0.6) + (opts.rise || 0), (Math.random() - 0.5) * sp);
       if (opts.vel) vel.add(opts.vel);
-      this.fxGroup.add(s);
       this.particles.push({ s, vel, life: opts.life || 0.6, age: 0, size, grow: opts.grow ?? 1.5, gravity: opts.gravity ?? 0, fade: opts.opacity ?? 1 });
     }
   }
@@ -879,6 +1058,18 @@ export class Renderer {
     this.spawn(pos, { n: Math.round(8 * big), color: '#ff6a2a', size: 0.7 * big, speed: 1.6 * big, life: 0.7, grow: 2.2 });
     this.spawn(pos, { n: Math.round(8 * big), color: '#3a3a3a', size: 0.8 * big, speed: 0.8, life: 1.6, rise: 0.8, normal: true, opacity: 0.55, grow: 2.5 });
     this.flash(pos, big);
+  }
+  // A brief bright bloom at the gun as it fires, with a little light thrown on the mech
+  muzzleFlash(pos, color, big = 1) {
+    this.spawn(pos, { n: 1, color: '#fff6e0', size: 0.8 * big, speed: 0, up: 0, life: 0.09, grow: 0.6 });
+    this.spawn(pos, { n: 3, color, size: 0.32 * big, speed: 1.2 * big, up: 0.3, life: 0.12, grow: 0.4 });
+    if (this.quality !== 'low') this.flash(pos, 0.3 * big);
+  }
+  // Dust kicked up underfoot, in the colour of the ground
+  dust(pos, n = 3, size = 0.28) {
+    if (!this.theme) return;
+    if (this.quality === 'low') n = Math.ceil(n / 2);
+    this.spawn(pos, { n, color: this.theme.dust, size: size * 1.35, speed: 0.8, up: 0.25, rise: 0.2, life: 0.9, normal: true, opacity: this.theme === THEMES.snow ? 0.7 : 0.58, grow: 2.2, spread: 0.35 });
   }
   flash(pos, big = 1) {
     // reuse the dimmest light in the pool
@@ -889,23 +1080,25 @@ export class Renderer {
     this.beams.push({ obj: l, age: 0, life: 0.25, light: true, pooled: true, tok: l.userData.tok, base: 8 * big });
   }
   beam(a, b, color, width, life = 0.3) {
-    const dir = new THREE.Vector3().subVectors(b, a);
-    const len = dir.length();
-    const geo = new THREE.CylinderGeometry(width, width, len, 6, 1, true); geo.translate(0, len / 2, 0); geo.rotateX(Math.PI / 2);
-    const core = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
-    const glowGeo = new THREE.CylinderGeometry(width * 3, width * 3, len, 8, 1, true); glowGeo.translate(0, len / 2, 0); glowGeo.rotateX(Math.PI / 2);
-    const glow = new THREE.Mesh(glowGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const len = a.distanceTo(b);
+    // one unit tube per kind, scaled to each shot (they used to be built per shot and never freed)
+    if (!this.beamGeo) {
+      const tube = (seg) => { const gm = new THREE.CylinderGeometry(1, 1, 1, seg, 1, true); gm.translate(0, 0.5, 0); gm.rotateX(Math.PI / 2); return gm; };
+      this.beamGeo = { core: tube(6), glow: tube(8) };
+    }
+    const core = new THREE.Mesh(this.beamGeo.core, new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+    core.scale.set(width, width, len);
+    const glow = new THREE.Mesh(this.beamGeo.glow, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
+    glow.scale.set(width * 3, width * 3, len);
     const g = new THREE.Group(); g.add(core, glow); g.position.copy(a); g.lookAt(b);
     this.fxGroup.add(g);
     this.beams.push({ obj: g, age: 0, life, mats: [core.material, glow.material] });
   }
   projectile(a, b, opts) {
     return new Promise((resolve) => {
-      const mat = new THREE.SpriteMaterial({ map: this.tex, color: opts.color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
-      const s = new THREE.Sprite(mat); s.scale.setScalar(opts.size || 0.25); s.position.copy(a);
-      this.fxGroup.add(s);
+      const s = this.takeSprite(opts.color, false); s.scale.setScalar(opts.size || 0.25); s.position.copy(a);
       const dur = opts.dur || 0.3;
-      this.beams.push({ obj: s, age: 0, life: dur, proj: { a: a.clone(), b: b.clone(), arc: opts.arc || 0, trail: opts.trail }, done: resolve });
+      this.beams.push({ obj: s, age: 0, life: dur, sprite: true, proj: { a: a.clone(), b: b.clone(), arc: opts.arc || 0, trail: opts.trail }, done: resolve });
     });
   }
 
@@ -913,7 +1106,7 @@ export class Renderer {
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
       p.age += dt;
-      if (p.age >= p.life) { this.fxGroup.remove(p.s); p.s.material.dispose(); this.particles.splice(i, 1); continue; }
+      if (p.age >= p.life) { this.releaseSprite(p.s); this.particles.splice(i, 1); continue; }
       p.vel.y -= p.gravity * dt;
       p.s.position.addScaledVector(p.vel, dt);
       p.vel.multiplyScalar(1 - dt * 1.5);
@@ -932,14 +1125,20 @@ export class Renderer {
         if (b.proj.trail && Math.random() < 0.8) this.spawn(b.obj.position, { color: '#9a9a9a', size: 0.18, speed: 0.2, life: 0.6, normal: true, opacity: 0.45, grow: 2 });
       } else if (b.light) { if (!b.pooled || b.obj.userData.tok === b.tok) b.obj.intensity = Math.max(0, b.base * (1 - k)); }
       else if (b.mats) b.mats.forEach((m, j) => { m.opacity = (1 - k) * (j ? 0.55 : 1); });
-      if (k >= 1) { if (b.pooled) { if (b.obj.userData.tok === b.tok) b.obj.intensity = 0; } else this.fxGroup.remove(b.obj); if (b.done) b.done(); this.beams.splice(i, 1); }
+      if (k >= 1) {
+        if (b.pooled) { if (b.obj.userData.tok === b.tok) b.obj.intensity = 0; }
+        else if (b.sprite) this.releaseSprite(b.obj);
+        else { this.fxGroup.remove(b.obj); if (b.mats) for (const m of b.mats) m.dispose(); }
+        if (b.done) b.done();
+        this.beams.splice(i, 1);
+      }
     }
   }
 
   // --------------------------------------------------------------- per-frame
   // Tread marks left on the ground by tracked mechs; they fade over a few seconds
   treadMark(pos, yaw, gauge, scale) {
-    if (!this.markGeo) { this.markGeo = new THREE.PlaneGeometry(1, 1); this.markGeo.rotateX(-Math.PI / 2); this.marks = []; }
+    if (!this.markGeo) { this.markGeo = new THREE.PlaneGeometry(1, 1); this.markGeo.rotateX(-Math.PI / 2); this.markGeo.userData.shared = true; this.marks = []; }
     for (const side of [-1, 1]) {
       const m = new THREE.Mesh(this.markGeo, new THREE.MeshBasicMaterial({ color: '#15130f', transparent: true, opacity: 0.6, depthWrite: false }));
       m.scale.set(0.16 * scale, 1, 0.34 * scale);
@@ -953,6 +1152,7 @@ export class Renderer {
   }
 
   frame(dt) {
+    if (this.liquidU) this.liquidU.uTime.value = this.time;
     if (this.fireFx) for (const f of this.fireFx) {
       const t = this.time * (f.glow ? 3 : 7) + f.ph;
       if (f.glow) { f.sp.material.opacity = 0.25 + Math.sin(t) * 0.08 + Math.random() * 0.05; continue; }
@@ -963,7 +1163,7 @@ export class Renderer {
     }
     if (this.smokeFx) for (const f of this.smokeFx) {
       const k = ((this.time * 0.18 + f.ph) % 1);
-      f.sp.position.copy(f.base).addScaledVector(this.windVec || new THREE.Vector3(), k * 1.2); f.sp.position.y += k * 1.4;
+      f.sp.position.copy(f.base).addScaledVector(this.windVec || (this._zero || (this._zero = new THREE.Vector3())), k * 1.2); f.sp.position.y += k * 1.4;
       f.sp.scale.setScalar(f.size * (0.8 + k * 0.9));
       f.sp.material.opacity = (f.lvl > 1 ? 0.45 : 0.28) * Math.sin(k * Math.PI);
     }
@@ -1009,15 +1209,26 @@ export class Renderer {
       v.ring.material.opacity = v.active ? 0.55 + pulse * 0.45 : v.hl ? 0.9 : 0.5;
       if (!m.dead) { tickWeaponAnims(v.model, dt, this.time); v.model.mats.vent.emissiveIntensity = 0.2 + Math.min(1, m.heat / 20) * 2.2 + (m.heat >= 14 ? Math.sin(this.time * 8) * 0.4 : 0); }
       v.ring.scale.setScalar(v.active ? 1 + pulse * 0.08 : 1);
+      if (v.rimMat && !m.dead) v.rimMat.userData.rimU.value.copy(v.rimMat.userData.team).multiplyScalar(v.active ? 0.5 + pulse * 0.45 : v.hl ? 0.7 : 0.38);
       // idle sway & torso tracking
       if (!v.animating && !m.dead && !v.prone) {
         v.model.torso.rotation.y += (v.wantYaw - v.model.torso.rotation.y) * Math.min(1, dt * 6);
         v.model.body.position.y = Math.sin(this.time * 1.6 + v.id) * 0.01 + v.model.vOffset;
       }
-      if ((v.damaged || m.dead) && !m.hidden && this.quality !== 'low' && Math.random() < dt * (m.dead ? 8 : 4)) {
-        const p = v.model.root.position.clone(); p.y += v.model.height * (m.dead ? 0.4 : 0.8);
-        this.spawn(p, { color: m.dead ? '#2c2c2c' : '#4a4a4a', size: 0.3, speed: 0.25, rise: 0.9, life: 2.2, normal: true, opacity: 0.5, grow: 3 });
-        if (m.dead && Math.random() < 0.4) this.spawn(p, { color: '#ff7a2a', size: 0.25, speed: 0.4, rise: 0.4, life: 0.5 });
+      // damage: smoke that thickens as armour goes, sparks when badly hurt, flames near the end
+      const hurt = m.dead ? 1 : v.damaged ? 1 - v.armorFrac : 0;
+      if (hurt > 0 && !m.hidden) {
+        const rate = (m.dead ? 8 : 2 + hurt * 9) * (this.quality === 'low' ? 0.35 : 1);
+        if (Math.random() < dt * rate) {
+          const p = v.model.root.position.clone(); p.y += v.model.height * (m.dead ? 0.4 : 0.55 + Math.random() * 0.3);
+          p.x += (Math.random() - 0.5) * 0.3; p.z += (Math.random() - 0.5) * 0.3;
+          this.spawn(p, { color: m.dead || hurt > 0.75 ? '#262626' : '#4a4a4a', size: 0.26 + hurt * 0.14, speed: 0.25, rise: 0.9, life: 2.2, normal: true, opacity: 0.4 + hurt * 0.2, grow: 3 });
+          if ((m.dead || hurt > 0.8) && Math.random() < 0.45) this.spawn(p, { color: '#ff7a2a', size: 0.22, speed: 0.4, rise: 0.5, life: 0.45 });
+        }
+        if (!m.dead && hurt > 0.65 && Math.random() < dt * 1.5) {
+          const p = this.bodyPoint(v, 0.3);
+          this.spawn(p, { n: 4, color: '#ffd27a', size: 0.07, speed: 2.4, up: 0.8, life: 0.35, grow: 0, gravity: 6 });
+        }
       }
       if (m.heat >= 14 && !m.dead && !m.hidden && Math.random() < dt * 3) {
         const p = v.model.root.position.clone(); p.y += v.model.height * 0.85;
@@ -1025,11 +1236,11 @@ export class Renderer {
       }
       // label
       const lp = v.model.root.position.clone(); lp.y += v.model.height + 0.35;
-      let s = this.project(lp);
+      let s = this.project(lp, rect);
       const ghosted = m.hidden && v.ghost && v.ghost.visible;
       if (m.hidden && !ghosted) { v.label.style.display = 'none'; continue; }
       v.label.classList.toggle('ghost', !!ghosted);
-      if (ghosted) { lp.copy(v.ghost.position); lp.y += 1.5; s = this.project(lp); if (v.ghostCol) v.ghostCol.material.opacity = 0.08 + pulse * 0.08; }
+      if (ghosted) { lp.copy(v.ghost.position); lp.y += 1.5; s = this.project(lp, rect); if (v.ghostCol) v.ghostCol.material.opacity = 0.08 + pulse * 0.08; }
       if (s.behind || m.exited || s.x < rect.left - 50 || s.x > rect.right + 50) v.label.style.display = 'none';
       else { v.label.style.display = ''; v.label.style.transform = `translate(${s.x - rect.left}px, ${s.y - rect.top}px) translate(-50%, -100%)`; v.label.classList.toggle('act', !!v.active); }
     }
@@ -1070,7 +1281,7 @@ export class Renderer {
     p.x += (Math.random() - 0.5) * spread; p.z += (Math.random() - 0.5) * spread;
     return p;
   }
-  panOf(pos) { const s = this.project(pos); const r = this.canvas.getBoundingClientRect(); return Math.max(-0.8, Math.min(0.8, ((s.x - r.left) / r.width) * 2 - 1)); }
+  panOf(pos) { const r = this.canvas.getBoundingClientRect(); const s = this.project(pos, r); return Math.max(-0.8, Math.min(0.8, ((s.x - r.left) / r.width) * 2 - 1)); }
 
   async runEvents(events, state, onEvent) {
     this.framed = null;
@@ -1268,7 +1479,7 @@ export class Renderer {
         if (!v.model.jets.length && Math.random() < 0.6) this.spawn(root.position, { color: '#7fd0ff', size: 0.35, speed: 0.4, vel: new THREE.Vector3(0, -2.5, 0), life: 0.35 });
       });
       sfx('step', { gain: 1.6, rate: 0.7 });
-      this.spawn(pb, { n: 10, color: '#8a7a66', size: 0.4, speed: 1.6, life: 0.8, normal: true, opacity: 0.45 });
+      this.dust(pb.clone().setY(pb.y + 0.1), 12, 0.42);
     } else {
       const stepMs = (e.mode === 'run' || e.mode === 'flank' ? 170 : tracked ? 200 : 240) / sp;
       for (let i = 1; i < path.length; i++) {
@@ -1298,8 +1509,11 @@ export class Renderer {
           const sw = Math.sin(k * Math.PI * 2) * 0.55;
           v.model.legs.forEach((l) => { const g = sw * l.gait; l.hip.rotation.x = g; l.knee.rotation.x = l.rest + Math.max(0, -g) * 0.8; });
         });
-        if (tracked) sfx('servo', { gain: 0.35, pan: this.panOf(pb) });
+        if (tracked) { sfx('servo', { gain: 0.35, pan: this.panOf(pb) }); this.dust(root.position, 2, 0.22 * v.model.scale); }
         else {
+          // dust under the planted foot; heavier mechs kick up more
+          const heavy = Math.min(1.6, 0.6 + v.state.tons / 70);
+          this.dust(pb.clone().add(new THREE.Vector3(Math.sin(root.rotation.y + Math.PI / 2) * 0.18 * (i % 2 ? 1 : -1), 0.05, Math.cos(root.rotation.y + Math.PI / 2) * 0.18 * (i % 2 ? 1 : -1))), Math.round(2 + heavy * 2), 0.2 * heavy);
           // footsteps of mechs off the screen: full, quieter or muted (Settings > sound)
           const on = this.offSteps === 'on' || this.onScreenPos(pb, 0);
           if (on || this.offSteps !== 'off') sfx('step', { tons: v.state.tons, pan: this.panOf(pb), vol: on ? 1 : 0.35 });
@@ -1338,6 +1552,8 @@ export class Renderer {
       else this.spawn(p, { n: 8, color: '#9c8a70', size: 0.35, speed: 1.4, life: 0.8, normal: true, opacity: 0.5 });
     };
     const dmg = e.hits.reduce((s, h) => s + h.dmg, 0);
+    const MUZZLE = { laserS: ['#ff8a3c', 0.6], laserM: ['#ff4d9a', 0.75], laserL: ['#ff3b5c', 1], plasma: ['#7fc8ff', 1], ac: ['#ffc44a', 1.1], mg: ['#ffd27a', 0.55], lrm: ['#ffb36b', 0.8], srm: ['#ffb36b', 0.7] }[W.fx];
+    if (MUZZLE) this.muzzleFlash(from, MUZZLE[0], MUZZLE[1]);
     switch (W.fx) {
       case 'laserS': case 'laserM': case 'laserL': {
         const size = W.fx === 'laserL' ? 1.6 : W.fx === 'laserM' ? 1.15 : 0.8;
@@ -1466,7 +1682,7 @@ export class Renderer {
       await this.tween(380 / sp, (k) => { root.position.set(land.x + (p0.x - land.x) * k, land.y + (p0.y - land.y) * k + 4 * k * (1 - k) * 1.2, land.z + (p0.z - land.z) * k); });
     } else {
       sfx('melee'); this.float(t, 'MISS', 'miss');
-      this.spawn(land.clone().add(new THREE.Vector3(0, 0.2, 0)), { n: 16, color: '#8a7a66', size: 0.5, speed: 2, life: 1, normal: true, opacity: 0.5 });
+      this.dust(land.clone().add(new THREE.Vector3(0, 0.2, 0)), 16, 0.5);
       await this.tween(260 / sp, (k) => { root.position.lerpVectors(land, p0, k); });
     }
     root.position.copy(p0);

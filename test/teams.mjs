@@ -12,7 +12,12 @@ for (const mis of MISSIONS) for (const [label, teams] of setups) {
   let n = 0;
   while (!st.over && n++ < 5000) {
     const c = aiNextCommand(st);
-    if (c && c.type === 'attack') { const a = st.mechs[c.id], t = st.mechs[c.target]; if (a.team === t.team) friendly++; }
+    if (c && c.type === 'attack') {
+      // attacks on structures and vehicles carry `structure` / `unit` instead of `target`
+      const a = st.mechs[c.id];
+      const t = c.target !== undefined ? st.mechs[c.target] : c.unit !== undefined ? st.units[c.unit] : c.structure !== undefined ? st.structures[c.structure] : null;
+      if (t && t.team === a.team) friendly++;
+    }
     const r = applyCommand(st, activeSide(st), c);
     if (!r.ok) applyCommand(st, activeSide(st), { type: 'end', id: c.id });
   }
@@ -20,3 +25,4 @@ for (const mis of MISSIONS) for (const [label, teams] of setups) {
   console.log(mis.id.padEnd(9), label.padEnd(12), 'teams:', teamNames.padEnd(36), 'round', String(st.round).padStart(2), '→', st.winner.team < 0 ? 'draw' : st.teams[st.winner.team].name, '|', st.winner.reason);
 }
 console.log('friendly-fire attempts:', friendly, '| deploy overlaps:', overlaps);
+if (friendly || overlaps) { console.log('FAIL friendly fire or overlapping deployment'); process.exit(1); }

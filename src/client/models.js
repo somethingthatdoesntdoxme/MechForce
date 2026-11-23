@@ -6,7 +6,27 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { WEAPONS } from '../core/data.js';
 
 const geoCache = new Map();
-const cached = (k, make) => { if (!geoCache.has(k)) geoCache.set(k, make()); return geoCache.get(k); };
+// shared geometry/materials are flagged so disposeModel() leaves them for the next model
+const shared = (x) => { x.userData.shared = true; return x; };
+const cached = (k, make) => { if (!geoCache.has(k)) geoCache.set(k, shared(make())); return geoCache.get(k); };
+
+// Free the GPU side of a model that's leaving the scene for good (a destroyed or departed
+// mech, or everything on the old map). Shared geometry and materials are kept.
+export function disposeModel(model) {
+  if (!model) return;
+  const root = model.root || model;
+  const freeMat = (m) => {
+    if (!m || m.userData.shared) return;
+    if (m.map && !m.map.userData.shared) m.map.dispose();
+    m.dispose();
+  };
+  root.traverse((o) => {
+    if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose();
+    if (o.isSkinnedMesh && o.skeleton) o.skeleton.dispose(); // its bone texture
+    if (Array.isArray(o.material)) o.material.forEach(freeMat); else freeMat(o.material);
+  });
+  if (model.mats) for (const m of Object.values(model.mats)) if (m && m.isMaterial) freeMat(m);
+}
 const f3 = (n) => n.toFixed(3);
 function box(w, h, d) { return cached(`b${f3(w)},${f3(h)},${f3(d)}`, () => new THREE.BoxGeometry(w, h, d)); }
 // Chamfered armour block
@@ -168,18 +188,31 @@ export function tickWeaponAnims(model, dt, time) {
 // One material for every rigid part of every model: each vertex carries its own colour,
 // glow, metalness and roughness, so all the static parts under one moving joint collapse
 // into a single mesh — a single draw call — whatever they're made of.
-export const BAKED_MAT = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 1, roughness: 1, emissive: '#ffffff' });
-BAKED_MAT.onBeforeCompile = (sh) => {
+// Every baked model draws with this one shader: per-vertex metalness/roughness/emissive, plus
+// an optional rim light (a soft glow on the silhouette's edges) used to tint mechs in their
+// team colour so they stand out from the ground. All baked materials share one GPU program;
+// only the rim colour uniform differs.
+function bakedCompile(sh) {
+  sh.uniforms.rimColor = this.userData.rimU || { value: new THREE.Color(0, 0, 0) };
   sh.vertexShader = sh.vertexShader
     .replace('#include <common>', '#include <common>\nattribute vec2 mr;\nattribute vec3 emi;\nvarying vec2 vMR;\nvarying vec3 vEmi;')
     .replace('#include <begin_vertex>', '#include <begin_vertex>\nvMR = mr; vEmi = emi;');
   sh.fragmentShader = sh.fragmentShader
-    .replace('#include <common>', '#include <common>\nvarying vec2 vMR;\nvarying vec3 vEmi;')
+    .replace('#include <common>', '#include <common>\nvarying vec2 vMR;\nvarying vec3 vEmi;\nuniform vec3 rimColor;')
     .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = metalness * vMR.x;')
     .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = roughness * vMR.y;')
-    .replace('#include <emissivemap_fragment>', 'totalEmissiveRadiance = vEmi * emissive;');
-};
-BAKED_MAT.customProgramCacheKey = () => 'baked-v1';
+    .replace('#include <emissivemap_fragment>', `totalEmissiveRadiance = vEmi * emissive;
+  { float rimK = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0); totalEmissiveRadiance += rimColor * (rimK * rimK * rimK); }`);
+}
+export function bakedMat(rim) {
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 1, roughness: 1, emissive: '#ffffff' });
+  m.onBeforeCompile = bakedCompile;
+  m.customProgramCacheKey = () => 'baked-v2';
+  m.userData.baked = true;
+  m.userData.rimU = { value: new THREE.Color(rim ?? 0x000000) };
+  return m;
+}
+export const BAKED_MAT = shared(bakedMat());
 const bakeable = (m) => m && m.isMeshStandardMaterial && !m.userData.live && !m.transparent && !m.map && !m.vertexColors;
 function bakeGeo(mesh) {
   mesh.updateMatrix();
@@ -236,7 +269,7 @@ function mergeStatic(obj) {
 // idler and road wheels. Standing, it's shin armour; kneeling (tracked or QuadVee vehicle
 // mode) the shin swings flat and the tread runs along the ground. The links are one
 // instanced mesh so they can roll round the loop cheaply.
-const TREAD_MAT = new THREE.MeshStandardMaterial({ color: '#ffffff', metalness: 0.75, roughness: 0.55 });
+const TREAD_MAT = shared(new THREE.MeshStandardMaterial({ color: '#ffffff', metalness: 0.75, roughness: 0.55 }));
 const TREAD_A = new THREE.Color('#5d646d'), TREAD_B = new THREE.Color('#33383e');
 const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _e = new THREE.Euler(), _v = new THREE.Vector3(), _one = new THREE.Vector3(1, 1, 1);
 function trackPod(knee, legW, legLen, s, mats, M, back = false) {
@@ -589,6 +622,7 @@ const concreteMat = new THREE.MeshStandardMaterial({ color: '#80868c', roughness
 const concreteDark = new THREE.MeshStandardMaterial({ color: '#5b6066', roughness: 0.95, metalness: 0.05 });
 const sandMat = new THREE.MeshStandardMaterial({ color: '#8f7d5c', roughness: 1 });
 const windowMat = new THREE.MeshStandardMaterial({ color: '#1b2a33', emissive: new THREE.Color('#ffd58a'), emissiveIntensity: 0.6, roughness: 0.3 });
+[concreteMat, concreteDark, sandMat, windowMat].forEach(shared);
 export function buildStructure(kind, weapons, colorHex) {
   const mats = mechMaterials(colorHex || '#9aa3ad');
   const root = new THREE.Group();
@@ -670,15 +704,16 @@ export function buildStructure(kind, weapons, colorHex) {
 // Small conventional units, built to the same shape as mechs and structures: `torso` turns
 // to aim (a vehicle's turret, or the whole squad), weapons carry their real models, and the
 // infantry squad's troopers can be hidden one by one as the platoon takes losses.
-const BLOB_GEO = new THREE.CircleGeometry(0.5, 20);
+const BLOB_GEO = shared(new THREE.CircleGeometry(0.5, 20));
 const BLOB_MAT = (() => {
   const c = document.createElement('canvas'); c.width = c.height = 64;
   const x = c.getContext('2d'); const g = x.createRadialGradient(32, 32, 4, 32, 32, 32);
   g.addColorStop(0, 'rgba(0,0,0,0.45)'); g.addColorStop(1, 'rgba(0,0,0,0)'); x.fillStyle = g; x.fillRect(0, 0, 64, 64);
-  return new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false });
+  const t = shared(new THREE.CanvasTexture(c));
+  return shared(new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false }));
 })();
-const tyreMat = new THREE.MeshStandardMaterial({ color: '#1d1f22', roughness: 0.95 });
-const skinMats = ['#e2b996', '#c68c62', '#8d5a3b', '#5c3a26'].map((c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 }));
+const tyreMat = shared(new THREE.MeshStandardMaterial({ color: '#1d1f22', roughness: 0.95 }));
+const skinMats = ['#e2b996', '#c68c62', '#8d5a3b', '#5c3a26'].map((c) => shared(new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 })));
 export function buildUnit(kind, weapons, colorHex, motion, inf) {
   const mats = mechMaterials(colorHex || '#9aa3ad');
   const root = new THREE.Group();

@@ -37,12 +37,14 @@ const done = new Promise((res) => {
 // kick the first turn
 setTimeout(() => clients.forEach((c) => c.onState && c.state && c.onState()), 500);
 const st = await Promise.race([done, new Promise((r) => setTimeout(() => r(null), 60000))]);
-if (!st) console.log('TIMEOUT');
+let pass = false;
+if (!st) console.log('FAIL timeout');
 else {
   console.log('teams:', st.teams.map((t) => t.name).join(' vs '), '| winner:', st.winner.team >= 0 ? st.teams[st.winner.team].name : 'draw', '-', st.winner.reason, '| rounds', st.round);
   console.log('commands sent per player:', clients.map((c) => `${c.name} ${c.acted}`).join(', '));
   await new Promise((r) => setTimeout(r, 400));
   const same = clients.every((c) => c.state.seq === clients[0].state.seq && JSON.stringify(c.state.mechs) === JSON.stringify(clients[0].state.mechs));
   console.log('all four clients in sync:', same);
+  pass = same && st.over;
 }
-clients.forEach((c) => c.ws.close()); await srv.close(); process.exit(0);
+clients.forEach((c) => c.ws.close()); await srv.close(); process.exit(pass ? 0 : 1);

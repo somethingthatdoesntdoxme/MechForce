@@ -1,6 +1,6 @@
 // Map editor, lobby defences and structures in battle. OUT=dir node test/editor-ui.cjs
 const { chromium } = require('playwright');
-const OUT = process.env.OUT;
+const OUT = process.env.OUT || require('path').join(__dirname, '..', 'shots'); require('fs').mkdirSync(OUT, { recursive: true });
 (async () => {
   const b = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const p = await (await b.newContext({ viewport: { width: 1366, height: 820 } })).newPage();

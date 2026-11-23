@@ -1,5 +1,5 @@
 const { chromium } = require('playwright');
-const OUT = process.env.OUT;
+const OUT = process.env.OUT || require('path').join(__dirname, '..', 'shots'); require('fs').mkdirSync(OUT, { recursive: true });
 async function run(b, vp, mobile, tag) {
   const ctx = await b.newContext({ viewport: vp, isMobile: mobile, hasTouch: mobile });
   await ctx.addInitScript(() => localStorage.setItem('mechforce.settings', JSON.stringify({ quality: 'low', speed: 8 })));
