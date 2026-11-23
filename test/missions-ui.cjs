@@ -1,6 +1,6 @@
 // New missions and physical attacks in the browser. OUT=dir node test/missions-ui.cjs
 const { chromium } = require('playwright');
-const OUT = process.env.OUT;
+const OUT = process.env.OUT || require('path').join(__dirname, '..', 'shots'); require('fs').mkdirSync(OUT, { recursive: true });
 let fails = 0;
 const ok = (c, msg) => { if (!c) { fails++; console.log('FAIL', msg); } else console.log('ok  ', msg); };
 (async () => {

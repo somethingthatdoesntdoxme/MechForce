@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import dgram from 'node:dgram';
+import zlib from 'node:zlib';
 import { WebSocketServer } from 'ws';
 import { Room } from '../src/core/room.js';
 import { PROTOCOL, VERSION } from '../src/core/data.js';
@@ -41,22 +42,49 @@ export function startServer(opts = {}) {
 
   const info = () => ({ mechforce: true, name, version: VERSION, protocol: PROTOCOL, port, rooms: [...rooms.values()].map((r) => r.summary()) });
 
-  const server = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://x');
-    if (url.pathname === '/mf/info') {
-      res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
-      return res.end(JSON.stringify(info()));
-    }
-    if (!webRoot) { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('MechForce server ' + VERSION); }
-    let p = decodeURIComponent(url.pathname);
-    if (p === '/' || p === '') p = '/index.html';
-    const file = path.normalize(path.join(webRoot, p));
-    if (!file.startsWith(path.normalize(webRoot))) { res.writeHead(403); return res.end(); }
-    fs.readFile(file, (err, data) => {
-      if (err) { res.writeHead(404); return res.end('not found'); }
-      res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-cache' });
-      res.end(data);
+  // Static files are kept in memory (and gzipped once) instead of re-read for every request:
+  // the web client is one ~1.4 MB page, which gzips to roughly a third of that.
+  const fileCache = new Map(); // path -> { mtimeMs, data, gz }
+  const COMPRESSIBLE = new Set(['.html', '.js', '.css', '.json', '.svg', '.webmanifest']);
+  const loadFile = (file, cb) => fs.stat(file, (err, st) => {
+    if (err || !st.isFile()) return cb(err || new Error('not a file'));
+    const hit = fileCache.get(file);
+    if (hit && hit.mtimeMs === st.mtimeMs) return cb(null, hit);
+    fs.readFile(file, (err2, data) => {
+      if (err2) return cb(err2);
+      const entry = { mtimeMs: st.mtimeMs, data, gz: COMPRESSIBLE.has(path.extname(file)) && data.length > 1024 ? zlib.gzipSync(data) : null };
+      fileCache.set(file, entry);
+      cb(null, entry);
     });
+  });
+  const root = path.resolve(webRoot || '.');
+
+  const server = http.createServer((req, res) => {
+    // Never let a bad request take the whole server (and every game on it) down
+    try {
+      const url = new URL(req.url, 'http://x');
+      if (url.pathname === '/mf/info') {
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
+        return res.end(JSON.stringify(info()));
+      }
+      if (!webRoot) { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('MechForce server ' + VERSION); }
+      let p;
+      try { p = decodeURIComponent(url.pathname); } catch { res.writeHead(400); return res.end('bad request'); }
+      if (p === '/' || p === '') p = '/index.html';
+      const file = path.resolve(root, '.' + p);
+      if (file !== root && !file.startsWith(root + path.sep)) { res.writeHead(403); return res.end(); }
+      loadFile(file, (err, f) => {
+        if (err) { res.writeHead(404); return res.end('not found'); }
+        const headers = { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-cache', vary: 'accept-encoding' };
+        const gzip = f.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+        if (gzip) headers['content-encoding'] = 'gzip';
+        res.writeHead(200, headers);
+        res.end(req.method === 'HEAD' ? undefined : gzip ? f.gz : f.data);
+      });
+    } catch (e) {
+      log('http error', e.message);
+      try { res.writeHead(500); res.end(); } catch {}
+    }
   });
 
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 256 * 1024 });
@@ -89,6 +117,11 @@ export function startServer(opts = {}) {
     ws.on('message', (data) => {
       let msg;
       try { msg = JSON.parse(String(data)); } catch { return; }
+      if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+      // one malformed or unexpected message must never crash the server for everyone
+      try { onMessage(msg); } catch (e) { log('message error', e.message); }
+    });
+    const onMessage = (msg) => {
       if (!room) {
         if (msg.t !== 'hello') return;
         if (msg.protocol !== PROTOCOL) {
@@ -111,14 +144,13 @@ export function startServer(opts = {}) {
         const origSend = room.send;
         let assigned = null;
         room.send = (id, m) => { if (m.t === 'welcome' && !assigned) { assigned = id; sockets.delete(tmpId); sockets.set(id, ws); } origSend(id, m); };
-        cid = room.join({ name: msg.name, platform: msg.platform, token: msg.token });
-        room.send = origSend;
+        try { cid = room.join({ name: msg.name, platform: msg.platform, token: msg.token }); } finally { room.send = origSend; sockets.delete(tmpId); }
         sockets.set(cid, ws);
         log(`${msg.name || '?'} (${msg.platform || '?'}) joined ${room.code} from ${req.socket.remoteAddress}`);
         return;
       }
       room.handle(cid, msg);
-    });
+    };
     ws.on('close', () => {
       if (room && cid) { if (sockets.get(cid) === ws) sockets.delete(cid); room.leave(cid); }
     });

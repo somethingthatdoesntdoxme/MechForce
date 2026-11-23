@@ -759,7 +759,7 @@ export class Renderer {
 
   onScreenPos(pos, margin = 60) {
     const rect = this.canvas.getBoundingClientRect();
-    const s = this.project(pos.clone());
+    const s = this.project(pos, rect);
     return !s.behind && s.x > rect.left + margin && s.x < rect.right - margin && s.y > rect.top + margin && s.y < rect.bottom - margin;
   }
   onScreen(id, margin = 40) {
@@ -767,7 +767,7 @@ export class Renderer {
     if (!m) return true;
     const rect = this.canvas.getBoundingClientRect();
     const q = m.model.root.position.clone(); q.y += m.model.height * 0.6;
-    const s = this.project(q);
+    const s = this.project(q, rect);
     return !s.behind && s.x > rect.left + margin && s.x < rect.right - margin && s.y > rect.top + margin && s.y < rect.bottom - margin;
   }
   async settleFraming(a, b) {
@@ -849,28 +849,43 @@ export class Renderer {
     return o;
   }
 
-  project(vec) {
-    const v = vec.clone().project(this.camera);
-    const r = this.canvas.getBoundingClientRect();
+  // Pass `r` (the canvas rect) when projecting many points in a frame: reading the rect
+  // after writing label styles forces the browser to redo layout, once per mech per frame.
+  project(vec, r = this.canvas.getBoundingClientRect()) {
+    const v = (this._pv || (this._pv = new THREE.Vector3())).copy(vec).project(this.camera);
     return { x: (v.x + 1) / 2 * r.width + r.left, y: (1 - v.y) / 2 * r.height + r.top, behind: v.z > 1 };
   }
 
   // --------------------------------------------------------------- particles & effects
+  // Particle sprites are recycled rather than built and thrown away: an explosion alone used
+  // to make ~30 materials that were garbage half a second later.
+  takeSprite(color, normal, opacity = 1) {
+    const s = (this.spritePool || (this.spritePool = [])).pop() ||
+      new THREE.Sprite(new THREE.SpriteMaterial({ map: this.tex, transparent: true, depthWrite: false }));
+    const m = s.material;
+    m.color.set(color); m.opacity = opacity;
+    m.blending = normal ? THREE.NormalBlending : THREE.AdditiveBlending;
+    s.position.set(0, 0, 0); s.scale.setScalar(1); s.visible = true;
+    this.fxGroup.add(s);
+    return s;
+  }
+  releaseSprite(s) {
+    this.fxGroup.remove(s);
+    if (this.spritePool.length < 600) this.spritePool.push(s); else s.material.dispose();
+  }
   spawn(pos, opts) {
     const n = opts.n || 1;
     const cap = this.quality === 'low' ? 160 : 500;
     for (let i = 0; i < n; i++) {
-      if (this.particles.length > cap) { const old = this.particles.shift(); this.fxGroup.remove(old.s); }
-      const mat = new THREE.SpriteMaterial({ map: this.tex, color: opts.color || '#ffaa33', transparent: true, blending: opts.normal ? THREE.NormalBlending : THREE.AdditiveBlending, depthWrite: false, opacity: opts.opacity ?? 1 });
-      const s = new THREE.Sprite(mat);
+      if (this.particles.length > cap) this.releaseSprite(this.particles.shift().s);
+      const s = this.takeSprite(opts.color || '#ffaa33', opts.normal, opts.opacity ?? 1);
       s.position.copy(pos);
-      if (opts.spread) s.position.add(new THREE.Vector3((Math.random() - 0.5) * opts.spread, (Math.random() - 0.5) * opts.spread, (Math.random() - 0.5) * opts.spread));
+      if (opts.spread) s.position.x += (Math.random() - 0.5) * opts.spread, s.position.y += (Math.random() - 0.5) * opts.spread, s.position.z += (Math.random() - 0.5) * opts.spread;
       const size = (opts.size || 0.4) * (0.7 + Math.random() * 0.6);
       s.scale.setScalar(size);
       const sp = opts.speed ?? 2;
       const vel = new THREE.Vector3((Math.random() - 0.5) * sp, Math.random() * sp * (opts.up ?? 0.6) + (opts.rise || 0), (Math.random() - 0.5) * sp);
       if (opts.vel) vel.add(opts.vel);
-      this.fxGroup.add(s);
       this.particles.push({ s, vel, life: opts.life || 0.6, age: 0, size, grow: opts.grow ?? 1.5, gravity: opts.gravity ?? 0, fade: opts.opacity ?? 1 });
     }
   }
@@ -889,23 +904,25 @@ export class Renderer {
     this.beams.push({ obj: l, age: 0, life: 0.25, light: true, pooled: true, tok: l.userData.tok, base: 8 * big });
   }
   beam(a, b, color, width, life = 0.3) {
-    const dir = new THREE.Vector3().subVectors(b, a);
-    const len = dir.length();
-    const geo = new THREE.CylinderGeometry(width, width, len, 6, 1, true); geo.translate(0, len / 2, 0); geo.rotateX(Math.PI / 2);
-    const core = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
-    const glowGeo = new THREE.CylinderGeometry(width * 3, width * 3, len, 8, 1, true); glowGeo.translate(0, len / 2, 0); glowGeo.rotateX(Math.PI / 2);
-    const glow = new THREE.Mesh(glowGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const len = a.distanceTo(b);
+    // one unit tube per kind, scaled to each shot (they used to be built per shot and never freed)
+    if (!this.beamGeo) {
+      const tube = (seg) => { const gm = new THREE.CylinderGeometry(1, 1, 1, seg, 1, true); gm.translate(0, 0.5, 0); gm.rotateX(Math.PI / 2); return gm; };
+      this.beamGeo = { core: tube(6), glow: tube(8) };
+    }
+    const core = new THREE.Mesh(this.beamGeo.core, new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+    core.scale.set(width, width, len);
+    const glow = new THREE.Mesh(this.beamGeo.glow, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
+    glow.scale.set(width * 3, width * 3, len);
     const g = new THREE.Group(); g.add(core, glow); g.position.copy(a); g.lookAt(b);
     this.fxGroup.add(g);
     this.beams.push({ obj: g, age: 0, life, mats: [core.material, glow.material] });
   }
   projectile(a, b, opts) {
     return new Promise((resolve) => {
-      const mat = new THREE.SpriteMaterial({ map: this.tex, color: opts.color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
-      const s = new THREE.Sprite(mat); s.scale.setScalar(opts.size || 0.25); s.position.copy(a);
-      this.fxGroup.add(s);
+      const s = this.takeSprite(opts.color, false); s.scale.setScalar(opts.size || 0.25); s.position.copy(a);
       const dur = opts.dur || 0.3;
-      this.beams.push({ obj: s, age: 0, life: dur, proj: { a: a.clone(), b: b.clone(), arc: opts.arc || 0, trail: opts.trail }, done: resolve });
+      this.beams.push({ obj: s, age: 0, life: dur, sprite: true, proj: { a: a.clone(), b: b.clone(), arc: opts.arc || 0, trail: opts.trail }, done: resolve });
     });
   }
 
@@ -913,7 +930,7 @@ export class Renderer {
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
       p.age += dt;
-      if (p.age >= p.life) { this.fxGroup.remove(p.s); p.s.material.dispose(); this.particles.splice(i, 1); continue; }
+      if (p.age >= p.life) { this.releaseSprite(p.s); this.particles.splice(i, 1); continue; }
       p.vel.y -= p.gravity * dt;
       p.s.position.addScaledVector(p.vel, dt);
       p.vel.multiplyScalar(1 - dt * 1.5);
@@ -932,7 +949,13 @@ export class Renderer {
         if (b.proj.trail && Math.random() < 0.8) this.spawn(b.obj.position, { color: '#9a9a9a', size: 0.18, speed: 0.2, life: 0.6, normal: true, opacity: 0.45, grow: 2 });
       } else if (b.light) { if (!b.pooled || b.obj.userData.tok === b.tok) b.obj.intensity = Math.max(0, b.base * (1 - k)); }
       else if (b.mats) b.mats.forEach((m, j) => { m.opacity = (1 - k) * (j ? 0.55 : 1); });
-      if (k >= 1) { if (b.pooled) { if (b.obj.userData.tok === b.tok) b.obj.intensity = 0; } else this.fxGroup.remove(b.obj); if (b.done) b.done(); this.beams.splice(i, 1); }
+      if (k >= 1) {
+        if (b.pooled) { if (b.obj.userData.tok === b.tok) b.obj.intensity = 0; }
+        else if (b.sprite) this.releaseSprite(b.obj);
+        else { this.fxGroup.remove(b.obj); if (b.mats) for (const m of b.mats) m.dispose(); }
+        if (b.done) b.done();
+        this.beams.splice(i, 1);
+      }
     }
   }
 
@@ -963,7 +986,7 @@ export class Renderer {
     }
     if (this.smokeFx) for (const f of this.smokeFx) {
       const k = ((this.time * 0.18 + f.ph) % 1);
-      f.sp.position.copy(f.base).addScaledVector(this.windVec || new THREE.Vector3(), k * 1.2); f.sp.position.y += k * 1.4;
+      f.sp.position.copy(f.base).addScaledVector(this.windVec || (this._zero || (this._zero = new THREE.Vector3())), k * 1.2); f.sp.position.y += k * 1.4;
       f.sp.scale.setScalar(f.size * (0.8 + k * 0.9));
       f.sp.material.opacity = (f.lvl > 1 ? 0.45 : 0.28) * Math.sin(k * Math.PI);
     }
@@ -1025,11 +1048,11 @@ export class Renderer {
       }
       // label
       const lp = v.model.root.position.clone(); lp.y += v.model.height + 0.35;
-      let s = this.project(lp);
+      let s = this.project(lp, rect);
       const ghosted = m.hidden && v.ghost && v.ghost.visible;
       if (m.hidden && !ghosted) { v.label.style.display = 'none'; continue; }
       v.label.classList.toggle('ghost', !!ghosted);
-      if (ghosted) { lp.copy(v.ghost.position); lp.y += 1.5; s = this.project(lp); if (v.ghostCol) v.ghostCol.material.opacity = 0.08 + pulse * 0.08; }
+      if (ghosted) { lp.copy(v.ghost.position); lp.y += 1.5; s = this.project(lp, rect); if (v.ghostCol) v.ghostCol.material.opacity = 0.08 + pulse * 0.08; }
       if (s.behind || m.exited || s.x < rect.left - 50 || s.x > rect.right + 50) v.label.style.display = 'none';
       else { v.label.style.display = ''; v.label.style.transform = `translate(${s.x - rect.left}px, ${s.y - rect.top}px) translate(-50%, -100%)`; v.label.classList.toggle('act', !!v.active); }
     }
@@ -1070,7 +1093,7 @@ export class Renderer {
     p.x += (Math.random() - 0.5) * spread; p.z += (Math.random() - 0.5) * spread;
     return p;
   }
-  panOf(pos) { const s = this.project(pos); const r = this.canvas.getBoundingClientRect(); return Math.max(-0.8, Math.min(0.8, ((s.x - r.left) / r.width) * 2 - 1)); }
+  panOf(pos) { const r = this.canvas.getBoundingClientRect(); const s = this.project(pos, r); return Math.max(-0.8, Math.min(0.8, ((s.x - r.left) / r.width) * 2 - 1)); }
 
   async runEvents(events, state, onEvent) {
     this.framed = null;
