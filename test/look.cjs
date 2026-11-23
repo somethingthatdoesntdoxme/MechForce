@@ -10,7 +10,7 @@ const path = require('path');
   const errs = []; p.on('pageerror', (e) => errs.push(e.message));
   await p.goto('file://' + path.join(__dirname, '..', 'dist/web/index.html')); await p.waitForTimeout(2500);
   await p.screenshot({ path: path.join(OUT, 'look-title.png') });
-  const themes = (process.env.THEMES || 'temperate,desert,snow,volcanic,urban').split(',');
+  const themes = (process.env.THEMES || 'temperate,desert,snow,lunar,volcanic').split(',');
   for (const theme of themes) {
     await p.evaluate(() => { const a = window.__mf; a.stopAttract && a.stopAttract(); a.startLocal('skirmish'); });
     await p.waitForTimeout(300);

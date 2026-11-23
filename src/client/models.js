@@ -188,18 +188,31 @@ export function tickWeaponAnims(model, dt, time) {
 // One material for every rigid part of every model: each vertex carries its own colour,
 // glow, metalness and roughness, so all the static parts under one moving joint collapse
 // into a single mesh — a single draw call — whatever they're made of.
-export const BAKED_MAT = shared(new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 1, roughness: 1, emissive: '#ffffff' }));
-BAKED_MAT.onBeforeCompile = (sh) => {
+// Every baked model draws with this one shader: per-vertex metalness/roughness/emissive, plus
+// an optional rim light (a soft glow on the silhouette's edges) used to tint mechs in their
+// team colour so they stand out from the ground. All baked materials share one GPU program;
+// only the rim colour uniform differs.
+function bakedCompile(sh) {
+  sh.uniforms.rimColor = this.userData.rimU || { value: new THREE.Color(0, 0, 0) };
   sh.vertexShader = sh.vertexShader
     .replace('#include <common>', '#include <common>\nattribute vec2 mr;\nattribute vec3 emi;\nvarying vec2 vMR;\nvarying vec3 vEmi;')
     .replace('#include <begin_vertex>', '#include <begin_vertex>\nvMR = mr; vEmi = emi;');
   sh.fragmentShader = sh.fragmentShader
-    .replace('#include <common>', '#include <common>\nvarying vec2 vMR;\nvarying vec3 vEmi;')
+    .replace('#include <common>', '#include <common>\nvarying vec2 vMR;\nvarying vec3 vEmi;\nuniform vec3 rimColor;')
     .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = metalness * vMR.x;')
     .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = roughness * vMR.y;')
-    .replace('#include <emissivemap_fragment>', 'totalEmissiveRadiance = vEmi * emissive;');
-};
-BAKED_MAT.customProgramCacheKey = () => 'baked-v1';
+    .replace('#include <emissivemap_fragment>', `totalEmissiveRadiance = vEmi * emissive;
+  { float rimK = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0); totalEmissiveRadiance += rimColor * (rimK * rimK * rimK); }`);
+}
+export function bakedMat(rim) {
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 1, roughness: 1, emissive: '#ffffff' });
+  m.onBeforeCompile = bakedCompile;
+  m.customProgramCacheKey = () => 'baked-v2';
+  m.userData.baked = true;
+  m.userData.rimU = { value: new THREE.Color(rim ?? 0x000000) };
+  return m;
+}
+export const BAKED_MAT = shared(bakedMat());
 const bakeable = (m) => m && m.isMeshStandardMaterial && !m.userData.live && !m.transparent && !m.map && !m.vertexColors;
 function bakeGeo(mesh) {
   mesh.updateMatrix();

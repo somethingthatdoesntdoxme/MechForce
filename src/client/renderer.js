@@ -20,12 +20,37 @@ const SANITIZE = {
       gl_FragColor = vec4(rgb, (isnan(c.a) || isinf(c.a)) ? 1.0 : clamp(c.a, 0.0, 1.0));
     }`,
 };
+// Colour grade, applied after tone mapping (display space): contrast, saturation, then a
+// lift (tints the shadows) and gain (tints the highlights). Set per map in buildMap.
+const GRADE = {
+  uniforms: { tDiffuse: { value: null }, lift: { value: new THREE.Vector3() }, gain: { value: new THREE.Vector3(1, 1, 1) }, sat: { value: 1 }, contrast: { value: 1 } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform vec3 lift; uniform vec3 gain; uniform float sat; uniform float contrast; varying vec2 vUv;
+    void main() {
+      vec4 t = texture2D(tDiffuse, vUv);
+      vec3 c = clamp((t.rgb - 0.5) * contrast + 0.5, 0.0, 1.0);
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      c = mix(vec3(l), c, sat);
+      c = clamp(c * gain + lift * (1.0 - c), 0.0, 1.0);
+      gl_FragColor = vec4(c, t.a);
+    }`,
+};
+// Per-map light and grade. exposure applies on every quality setting; the grade needs the
+// post-processing chain (medium and high).
+const LOOK = {
+  temperate: { exposure: 1.0, hemi: 1.05, sun: 1.9, lift: [0.0, 0.012, 0.03], gain: [1.0, 1.0, 0.98], sat: 1.08, contrast: 1.05 },
+  desert: { exposure: 0.95, hemi: 1.05, sun: 1.65, lift: [0.02, 0.01, 0.0], gain: [1.02, 1.0, 0.95], sat: 1.02, contrast: 1.06 },
+  snow: { exposure: 0.88, hemi: 1.0, sun: 1.5, lift: [0.0, 0.01, 0.035], gain: [0.98, 1.0, 1.03], sat: 1.1, contrast: 1.12 },
+  lunar: { exposure: 1.05, hemi: 0.35, sun: 1.9, lift: [0.0, 0.0, 0.02], gain: [1.0, 1.0, 1.02], sat: 0.9, contrast: 1.12 },
+  // volcanic was murky: more exposure and a warm bounce light from below, as if off the lava
+  volcanic: { exposure: 1.3, hemi: 1.35, sun: 1.7, hemiGround: '#6a2a14', lift: [0.045, 0.014, 0.0], gain: [1.05, 0.98, 0.92], sat: 1.1, contrast: 1.0 },
+};
 import { center, DIR_ANGLE, toAxial, fromAxial, neighbor } from '../core/hex.js';
 import { WEAPONS, TERRAIN, UNITS } from '../core/data.js';
 import { view as palView, RING_SEGMENTS, shapeFor } from './palette.js';
 import { totalArmor, maxArmor, operational } from '../core/rules.js';
 import { renderScale, saverOn } from './perf.js';
-import { buildMech, buildItem, triggerWeaponAnim, tickWeaponAnims, rollTracks, buildStructure, buildUnit, skinMerge, BAKED_MAT, disposeModel } from './models.js';
+import { buildMech, buildItem, triggerWeaponAnim, tickWeaponAnims, rollTracks, buildStructure, buildUnit, skinMerge, BAKED_MAT, bakedMat, disposeModel } from './models.js';
 import { sfx } from './audio.js';
 import { input } from './input.js';
 import { rnd, patchNoise, hexAtPoint, liquidMaterial, skyDome } from './terrainfx.js';
@@ -37,11 +62,11 @@ const facingRot = (f) => { const a = DIR_ANGLE[f] * Math.PI / 180; return Math.a
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const THEMES = {
-  temperate: { zenith: '#6c97bd', t: ['#6a8a45', '#55773a', '#3c5b2e', '#857f6c', '#2f6584', '#1f4a68'], side: '#54473a', ground: '#3a4630', fog: '#9fb4bd', sky: '#b9ccd4', hemi: ['#d8ecff', '#4d5b3a'], sun: '#fff1d6', tree: ['#3f6b2c', '#2f5524'], trunk: '#5a4330', rock: '#7d786a', water: '#3a7aa0', lava: false },
-  desert: { zenith: '#d7a86c', t: ['#cfa96c', '#a7a25c', '#7d8443', '#b48a5c', '#3c8597', '#2a6576'], side: '#94714a', ground: '#b08b5c', fog: '#e9d1a6', sky: '#f0dcb4', hemi: ['#fff1d8', '#a07a4c'], sun: '#ffe2b0', tree: ['#7e8a3e', '#5f6b2e'], trunk: '#6b4b2e', rock: '#9c7a52', water: '#3f95a8', lava: false },
-  snow: { zenith: '#9fbbd3', t: ['#e4ebf1', '#b7c9bf', '#86a092', '#c3ccd6', '#7aa0bb', '#557d9b'], side: '#909eab', ground: '#c9d4de', fog: '#d6e1ea', sky: '#e3ecf3', hemi: ['#f0f6ff', '#8592a0'], sun: '#ffffff', tree: ['#3d5d4f', '#2d4a3e'], trunk: '#4e4038', rock: '#a9b4bf', water: '#8fb7d0', lava: false },
-  lunar: { zenith: '#000000', t: ['#8e9096', '#8e9096', '#8e9096', '#6f7178', '#55575e', '#45474d'], side: '#4b4d54', ground: '#2b2c31', fog: '#06070c', sky: '#05060a', hemi: ['#c8d0ff', '#1a1a22'], sun: '#f4f6ff', tree: ['#666', '#555'], trunk: '#444', rock: '#5d5f66', water: '#55575e', lava: false, stars: true },
-  volcanic: { zenith: '#100604', t: ['#3e3734', '#4a3f30', '#352d24', '#2c2523', '#ff5a1f', '#ff3d0a'], side: '#25201e', ground: '#1d1715', fog: '#3a1d14', sky: '#2a130d', hemi: ['#ffb08a', '#2a1510'], sun: '#ffc39a', tree: ['#3b3326', '#2b241b'], trunk: '#2a201a', rock: '#3a302c', water: '#ff5a1f', lava: true },
+  temperate: { dust: '#8f8068', zenith: '#6c97bd', t: ['#6a8a45', '#55773a', '#3c5b2e', '#857f6c', '#2f6584', '#1f4a68'], side: '#54473a', ground: '#3a4630', fog: '#9fb4bd', sky: '#b9ccd4', hemi: ['#d8ecff', '#4d5b3a'], sun: '#fff1d6', tree: ['#3f6b2c', '#2f5524'], trunk: '#5a4330', rock: '#7d786a', water: '#3a7aa0', lava: false },
+  desert: { dust: '#d8b98a', zenith: '#d7a86c', t: ['#cfa96c', '#a7a25c', '#7d8443', '#b48a5c', '#3c8597', '#2a6576'], side: '#94714a', ground: '#b08b5c', fog: '#e9d1a6', sky: '#f0dcb4', hemi: ['#fff1d8', '#a07a4c'], sun: '#ffe2b0', tree: ['#7e8a3e', '#5f6b2e'], trunk: '#6b4b2e', rock: '#9c7a52', water: '#3f95a8', lava: false },
+  snow: { dust: '#eef3f8', zenith: '#9fbbd3', t: ['#e4ebf1', '#b7c9bf', '#86a092', '#c3ccd6', '#7aa0bb', '#557d9b'], side: '#909eab', ground: '#c9d4de', fog: '#d6e1ea', sky: '#e3ecf3', hemi: ['#f0f6ff', '#8592a0'], sun: '#ffffff', tree: ['#3d5d4f', '#2d4a3e'], trunk: '#4e4038', rock: '#a9b4bf', water: '#8fb7d0', lava: false },
+  lunar: { dust: '#a9abb2', zenith: '#000000', t: ['#8e9096', '#8e9096', '#8e9096', '#6f7178', '#55575e', '#45474d'], side: '#4b4d54', ground: '#2b2c31', fog: '#06070c', sky: '#05060a', hemi: ['#c8d0ff', '#1a1a22'], sun: '#f4f6ff', tree: ['#666', '#555'], trunk: '#444', rock: '#5d5f66', water: '#55575e', lava: false, stars: true },
+  volcanic: { dust: '#5e4a3e', zenith: '#100604', t: ['#3e3734', '#4a3f30', '#352d24', '#2c2523', '#ff5a1f', '#ff3d0a'], side: '#25201e', ground: '#1d1715', fog: '#3a1d14', sky: '#2a130d', hemi: ['#ffb08a', '#2a1510'], sun: '#ffc39a', tree: ['#3b3326', '#2b241b'], trunk: '#2a201a', rock: '#3a302c', water: '#ff5a1f', lava: true },
 };
 
 function radialTexture() {
@@ -126,6 +151,9 @@ export class Renderer {
       this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.4, 0.4, 0.92);
       this.composer.addPass(this.bloom);
       this.composer.addPass(new OutputPass());
+      this.grade = new ShaderPass(GRADE);
+      this.composer.addPass(this.grade);
+      if (this.look) this.applyLook(this.look);
     }
     this.resize();
     this.gl.compile(this.scene, this.camera);
@@ -158,6 +186,7 @@ export class Renderer {
     let vi = 0;
     const waterPos = [], waterIdx = [], waterShore = [];
     let wvi = 0;
+    const aoTmp = [1, 1, 1, 1, 1, 1];
     const tileAt = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? -1 : map.t[y * w + x]);
     const isLiquid = (t) => t === 4 || t === 5;
     const pushCol = (c, k = 1) => col.push(c.r * k, c.g * k, c.b * k);
@@ -165,15 +194,17 @@ export class Renderer {
     // edges rather than flat cards), then sides with a band of the top colour (the grass or
     // snow line) over earth that darkens toward the bottom.
     const BEVEL = 0.05, RIN = 0.86, R = 0.995, CAP = 0.1;
-    const column = (cx, cz, top, base, topCol, sideCol) => {
+    // `ao` (optional, per corner): darkening where a taller neighbour crowds the tile, baked
+    // into the vertex colours, so the shading in nooks costs nothing at draw time
+    const column = (cx, cz, top, base, topCol, sideCol, ao) => {
       const lip = top - BEVEL;
-      pos.push(cx, top, cz); pushCol(topCol);
+      pos.push(cx, top, cz); pushCol(topCol, ao ? 1 - (1 - (ao[0] + ao[1] + ao[2] + ao[3] + ao[4] + ao[5]) / 6) * 0.5 : 1);
       const ci = vi++;
-      for (let k = 0; k < 6; k++) { pos.push(cx + corners[k][0] * RIN, top, cz + corners[k][1] * RIN); pushCol(topCol, 0.97); vi++; }
+      for (let k = 0; k < 6; k++) { pos.push(cx + corners[k][0] * RIN, top, cz + corners[k][1] * RIN); pushCol(topCol, 0.97 * (ao ? ao[k] : 1)); vi++; }
       for (let k = 0; k < 6; k++) idx.push(ci, ci + 1 + ((k + 1) % 6), ci + 1 + k);
       // bevel ring
       const bi = vi;
-      for (let k = 0; k < 6; k++) { pos.push(cx + corners[k][0] * R, lip, cz + corners[k][1] * R); pushCol(topCol, 0.86); vi++; }
+      for (let k = 0; k < 6; k++) { pos.push(cx + corners[k][0] * R, lip, cz + corners[k][1] * R); pushCol(topCol, 0.86 * (ao ? ao[k] : 1)); vi++; }
       for (let k = 0; k < 6; k++) {
         const i0 = ci + 1 + k, i1 = ci + 1 + ((k + 1) % 6), o0 = bi + k, o1 = bi + ((k + 1) % 6);
         idx.push(i0, i1, o1, i0, o1, o0);
@@ -211,7 +242,18 @@ export class Renderer {
       tileColour(tmpC, t, x, y, e);
       // earth sides pick up a little of the tile colour so cliffs don't read as black voids
       sideC.copy(earth).lerp(tmpC, 0.22).offsetHSL(0, 0, 0.03 + e * 0.02);
-      column(c.px, c.py, top, -0.6, tmpC, sideC);
+      // corner occlusion from the two neighbours sharing each corner
+      for (let k = 0; k < 6; k++) {
+        let occ = 0;
+        for (const da of [-30, 30]) {
+          const a = (60 * k - 30 + da) * Math.PI / 180, nb = hexAtPoint(c.px + Math.cos(a) * 1.732, c.py + Math.sin(a) * 1.732);
+          const nt = tileAt(nb.x, nb.y);
+          if (nt < 0 || isLiquid(nt)) continue;
+          occ = Math.max(occ, topY(map.e[nb.y * w + nb.x]) - top);
+        }
+        aoTmp[k] = occ > 0.05 ? 1 - Math.min(0.32, occ * 0.3) : 1;
+      }
+      column(c.px, c.py, top, -0.6, tmpC, sideC, aoTmp);
       // grid outline
       for (let k = 0; k < 6; k++) {
         const a = corners[k], b = corners[(k + 1) % 6];
@@ -377,11 +419,8 @@ export class Renderer {
     // distance haze: its range follows the camera (see updateCamera) so the board stays crisp
     // while the scenery and ground beyond fade into the sky
     this.scene.fog = new THREE.Fog(th.fog, 40, 110);
-    this.hemi.color.set(th.hemi[0]); this.hemi.groundColor.set(th.hemi[1]);
-    // a softer sun and more sky light: bright enough to read, without glints off water and metal
-    this.hemi.intensity = map.theme === 'lunar' ? 0.35 : 1.05;
     this.sun.color.set(th.sun);
-    this.sun.intensity = { volcanic: 1.4, snow: 1.5, desert: 1.65 }[map.theme] ?? 1.9;
+    this.applyLook(LOOK[map.theme] || LOOK.temperate);
     this.buildTerrain(map);
     const { w, h } = map;
     const cx = (this.bounds.x0 + this.bounds.x1) / 2, cz = (this.bounds.z0 + this.bounds.z1) / 2;
@@ -408,6 +447,20 @@ export class Renderer {
     if (this.units) this.units.clear(); else this.units = new Map();
     this.fireFx = []; this.smokeFx = [];
     this.itemObj = null;
+  }
+
+  // Light levels and colour grade for the current map
+  applyLook(look) {
+    this.look = look;
+    const th = this.theme || THEMES.temperate;
+    // a softer sun and more sky light: bright enough to read, without glints off water and metal
+    this.hemi.color.set(th.hemi[0]); this.hemi.groundColor.set(look.hemiGround || th.hemi[1]);
+    this.hemi.intensity = look.hemi; this.sun.intensity = look.sun;
+    this.gl.toneMappingExposure = look.exposure;
+    if (this.grade) {
+      const u = this.grade.uniforms;
+      u.lift.value.set(...look.lift); u.gain.value.set(...look.gain); u.sat.value = look.sat; u.contrast.value = look.contrast;
+    }
   }
 
   tileTop(x, y) {
@@ -441,6 +494,9 @@ export class Renderer {
         const color = state.sides[m.side].color;
         const model = buildMech({ design: m.design, tons: m.tons, cls: m.cls, weapons: m.weapons, jump: m.jumpBase, body: m.body, mot: m.mot }, color);
         skinMerge(model.root);
+        // its own copy of the baked material, so its edges can glow in its side's colour
+        const rimMat = bakedMat(0x000000); rimMat.userData.team = new THREE.Color(color);
+        model.root.traverse((o) => { if (o.isMesh && o.material === BAKED_MAT) o.material = rimMat; });
         // colour-blind mode: each side's ring has its own shape (hexagon, triangle, square, octagon)
         const seg = palView.shapes ? RING_SEGMENTS[m.side % 4] : 6;
         const ring = new THREE.Mesh(new THREE.RingGeometry(seg === 3 ? 0.55 : 0.62, seg === 3 ? 0.72 : 0.74, seg), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false }));
@@ -452,7 +508,7 @@ export class Renderer {
         label.style.setProperty('--side', color);
         label.innerHTML = `${shapeFor(m.side) ? `<em class="shape">${shapeFor(m.side)}</em>` : ''}<b></b><i><s class="arm"></s></i><i class="h"><s class="heat"></s></i>`;
         this.labelLayer.appendChild(label);
-        v = { id: m.id, model, ring, label, prone: false, dead: false, walk: 0, torsoYaw: 0, wantYaw: 0, smoke: null, color };
+        v = { id: m.id, model, ring, label, prone: false, dead: false, walk: 0, torsoYaw: 0, wantYaw: 0, smoke: null, color, rimMat };
         this.mechs.set(m.id, v);
         this.mechGroup.add(model.root);
       }
@@ -636,7 +692,11 @@ export class Renderer {
         const src = o.material;
         o.material = src.clone(); o.material.color.multiplyScalar(0.25); if (o.material.emissive) o.material.emissiveIntensity = 0;
         // the baked material's shader hooks don't survive clone()
-        if (src === BAKED_MAT) { o.material.onBeforeCompile = src.onBeforeCompile; o.material.customProgramCacheKey = () => 'baked-v1-wreck'; }
+        if (src.userData.baked) {
+          o.material.onBeforeCompile = src.onBeforeCompile; o.material.customProgramCacheKey = src.customProgramCacheKey;
+          o.material.userData.rimU = { value: new THREE.Color(0, 0, 0) }; // wrecks don't glow
+          if (!src.userData.shared) src.dispose();
+        }
       });
       mdl.body.rotation.x = 0.5; mdl.body.rotation.z = 0.35; mdl.body.position.y = -mdl.height * 0.3;
       v.ring.visible = false;
@@ -652,7 +712,8 @@ export class Renderer {
       mdl.arms.forEach((a) => { a.sh.visible = !m.locGone[a.loc]; if (m.locGone[a.loc]) a.sh.scale.setScalar(0.0001); });
       mdl.legs.forEach((l) => { l.hip.scale.y = m.locGone[l.loc] ? 0.35 : 1; });
     }
-    v.damaged = !dead && totalArmor(m) / maxArmor(m) < 0.5;
+    v.armorFrac = totalArmor(m) / maxArmor(m);
+    v.damaged = !dead && v.armorFrac < 0.6;
     v.label.classList.toggle('dead', dead);
     v.label.querySelector('b').textContent = m.design;
     v.label.querySelector('.arm').style.width = (100 * totalArmor(m) / maxArmor(m)).toFixed(0) + '%';
@@ -998,6 +1059,18 @@ export class Renderer {
     this.spawn(pos, { n: Math.round(8 * big), color: '#3a3a3a', size: 0.8 * big, speed: 0.8, life: 1.6, rise: 0.8, normal: true, opacity: 0.55, grow: 2.5 });
     this.flash(pos, big);
   }
+  // A brief bright bloom at the gun as it fires, with a little light thrown on the mech
+  muzzleFlash(pos, color, big = 1) {
+    this.spawn(pos, { n: 1, color: '#fff6e0', size: 0.8 * big, speed: 0, up: 0, life: 0.09, grow: 0.6 });
+    this.spawn(pos, { n: 3, color, size: 0.32 * big, speed: 1.2 * big, up: 0.3, life: 0.12, grow: 0.4 });
+    if (this.quality !== 'low') this.flash(pos, 0.3 * big);
+  }
+  // Dust kicked up underfoot, in the colour of the ground
+  dust(pos, n = 3, size = 0.28) {
+    if (!this.theme) return;
+    if (this.quality === 'low') n = Math.ceil(n / 2);
+    this.spawn(pos, { n, color: this.theme.dust, size: size * 1.35, speed: 0.8, up: 0.25, rise: 0.2, life: 0.9, normal: true, opacity: this.theme === THEMES.snow ? 0.7 : 0.58, grow: 2.2, spread: 0.35 });
+  }
   flash(pos, big = 1) {
     // reuse the dimmest light in the pool
     let l = this.flashPool[0];
@@ -1136,15 +1209,26 @@ export class Renderer {
       v.ring.material.opacity = v.active ? 0.55 + pulse * 0.45 : v.hl ? 0.9 : 0.5;
       if (!m.dead) { tickWeaponAnims(v.model, dt, this.time); v.model.mats.vent.emissiveIntensity = 0.2 + Math.min(1, m.heat / 20) * 2.2 + (m.heat >= 14 ? Math.sin(this.time * 8) * 0.4 : 0); }
       v.ring.scale.setScalar(v.active ? 1 + pulse * 0.08 : 1);
+      if (v.rimMat && !m.dead) v.rimMat.userData.rimU.value.copy(v.rimMat.userData.team).multiplyScalar(v.active ? 0.5 + pulse * 0.45 : v.hl ? 0.7 : 0.38);
       // idle sway & torso tracking
       if (!v.animating && !m.dead && !v.prone) {
         v.model.torso.rotation.y += (v.wantYaw - v.model.torso.rotation.y) * Math.min(1, dt * 6);
         v.model.body.position.y = Math.sin(this.time * 1.6 + v.id) * 0.01 + v.model.vOffset;
       }
-      if ((v.damaged || m.dead) && !m.hidden && this.quality !== 'low' && Math.random() < dt * (m.dead ? 8 : 4)) {
-        const p = v.model.root.position.clone(); p.y += v.model.height * (m.dead ? 0.4 : 0.8);
-        this.spawn(p, { color: m.dead ? '#2c2c2c' : '#4a4a4a', size: 0.3, speed: 0.25, rise: 0.9, life: 2.2, normal: true, opacity: 0.5, grow: 3 });
-        if (m.dead && Math.random() < 0.4) this.spawn(p, { color: '#ff7a2a', size: 0.25, speed: 0.4, rise: 0.4, life: 0.5 });
+      // damage: smoke that thickens as armour goes, sparks when badly hurt, flames near the end
+      const hurt = m.dead ? 1 : v.damaged ? 1 - v.armorFrac : 0;
+      if (hurt > 0 && !m.hidden) {
+        const rate = (m.dead ? 8 : 2 + hurt * 9) * (this.quality === 'low' ? 0.35 : 1);
+        if (Math.random() < dt * rate) {
+          const p = v.model.root.position.clone(); p.y += v.model.height * (m.dead ? 0.4 : 0.55 + Math.random() * 0.3);
+          p.x += (Math.random() - 0.5) * 0.3; p.z += (Math.random() - 0.5) * 0.3;
+          this.spawn(p, { color: m.dead || hurt > 0.75 ? '#262626' : '#4a4a4a', size: 0.26 + hurt * 0.14, speed: 0.25, rise: 0.9, life: 2.2, normal: true, opacity: 0.4 + hurt * 0.2, grow: 3 });
+          if ((m.dead || hurt > 0.8) && Math.random() < 0.45) this.spawn(p, { color: '#ff7a2a', size: 0.22, speed: 0.4, rise: 0.5, life: 0.45 });
+        }
+        if (!m.dead && hurt > 0.65 && Math.random() < dt * 1.5) {
+          const p = this.bodyPoint(v, 0.3);
+          this.spawn(p, { n: 4, color: '#ffd27a', size: 0.07, speed: 2.4, up: 0.8, life: 0.35, grow: 0, gravity: 6 });
+        }
       }
       if (m.heat >= 14 && !m.dead && !m.hidden && Math.random() < dt * 3) {
         const p = v.model.root.position.clone(); p.y += v.model.height * 0.85;
@@ -1395,7 +1479,7 @@ export class Renderer {
         if (!v.model.jets.length && Math.random() < 0.6) this.spawn(root.position, { color: '#7fd0ff', size: 0.35, speed: 0.4, vel: new THREE.Vector3(0, -2.5, 0), life: 0.35 });
       });
       sfx('step', { gain: 1.6, rate: 0.7 });
-      this.spawn(pb, { n: 10, color: '#8a7a66', size: 0.4, speed: 1.6, life: 0.8, normal: true, opacity: 0.45 });
+      this.dust(pb.clone().setY(pb.y + 0.1), 12, 0.42);
     } else {
       const stepMs = (e.mode === 'run' || e.mode === 'flank' ? 170 : tracked ? 200 : 240) / sp;
       for (let i = 1; i < path.length; i++) {
@@ -1425,8 +1509,11 @@ export class Renderer {
           const sw = Math.sin(k * Math.PI * 2) * 0.55;
           v.model.legs.forEach((l) => { const g = sw * l.gait; l.hip.rotation.x = g; l.knee.rotation.x = l.rest + Math.max(0, -g) * 0.8; });
         });
-        if (tracked) sfx('servo', { gain: 0.35, pan: this.panOf(pb) });
+        if (tracked) { sfx('servo', { gain: 0.35, pan: this.panOf(pb) }); this.dust(root.position, 2, 0.22 * v.model.scale); }
         else {
+          // dust under the planted foot; heavier mechs kick up more
+          const heavy = Math.min(1.6, 0.6 + v.state.tons / 70);
+          this.dust(pb.clone().add(new THREE.Vector3(Math.sin(root.rotation.y + Math.PI / 2) * 0.18 * (i % 2 ? 1 : -1), 0.05, Math.cos(root.rotation.y + Math.PI / 2) * 0.18 * (i % 2 ? 1 : -1))), Math.round(2 + heavy * 2), 0.2 * heavy);
           // footsteps of mechs off the screen: full, quieter or muted (Settings > sound)
           const on = this.offSteps === 'on' || this.onScreenPos(pb, 0);
           if (on || this.offSteps !== 'off') sfx('step', { tons: v.state.tons, pan: this.panOf(pb), vol: on ? 1 : 0.35 });
@@ -1465,6 +1552,8 @@ export class Renderer {
       else this.spawn(p, { n: 8, color: '#9c8a70', size: 0.35, speed: 1.4, life: 0.8, normal: true, opacity: 0.5 });
     };
     const dmg = e.hits.reduce((s, h) => s + h.dmg, 0);
+    const MUZZLE = { laserS: ['#ff8a3c', 0.6], laserM: ['#ff4d9a', 0.75], laserL: ['#ff3b5c', 1], plasma: ['#7fc8ff', 1], ac: ['#ffc44a', 1.1], mg: ['#ffd27a', 0.55], lrm: ['#ffb36b', 0.8], srm: ['#ffb36b', 0.7] }[W.fx];
+    if (MUZZLE) this.muzzleFlash(from, MUZZLE[0], MUZZLE[1]);
     switch (W.fx) {
       case 'laserS': case 'laserM': case 'laserL': {
         const size = W.fx === 'laserL' ? 1.6 : W.fx === 'laserM' ? 1.15 : 0.8;
@@ -1593,7 +1682,7 @@ export class Renderer {
       await this.tween(380 / sp, (k) => { root.position.set(land.x + (p0.x - land.x) * k, land.y + (p0.y - land.y) * k + 4 * k * (1 - k) * 1.2, land.z + (p0.z - land.z) * k); });
     } else {
       sfx('melee'); this.float(t, 'MISS', 'miss');
-      this.spawn(land.clone().add(new THREE.Vector3(0, 0.2, 0)), { n: 16, color: '#8a7a66', size: 0.5, speed: 2, life: 1, normal: true, opacity: 0.5 });
+      this.dust(land.clone().add(new THREE.Vector3(0, 0.2, 0)), 16, 0.5);
       await this.tween(260 / sp, (k) => { root.position.lerpVectors(land, p0, k); });
     }
     root.position.copy(p0);
