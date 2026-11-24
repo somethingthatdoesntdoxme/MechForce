@@ -103,3 +103,67 @@ export function skyDome(horizon, zenith) {
   dome.renderOrder = -10; dome.frustumCulled = false;
   return dome;
 }
+
+// Particles (explosions, smoke, dust, sparks) drawn as one instanced mesh per blend mode
+// instead of one sprite each: a big volley used to mean hundreds of draw calls. Each
+// particle is a camera-facing quad (not a GL point, whose size is capped on some GPUs).
+export class ParticleBatch {
+  constructor(capacity, tex, additive) {
+    this.cap = capacity;
+    const g = new THREE.InstancedBufferGeometry();
+    const quad = new THREE.PlaneGeometry(1, 1);
+    g.index = quad.index; g.attributes.position = quad.attributes.position; g.attributes.uv = quad.attributes.uv;
+    this.pos = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
+    this.col = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4), 4); // rgb + alpha
+    this.size = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
+    for (const a of [this.pos, this.col, this.size]) a.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('iPos', this.pos); g.setAttribute('iCol', this.col); g.setAttribute('iSize', this.size);
+    g.instanceCount = 0;
+    const mat = new THREE.ShaderMaterial({
+      uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { map: { value: tex } }]),
+      vertexShader: `attribute vec3 iPos; attribute vec4 iCol; attribute float iSize;
+        varying vec2 vUv; varying vec4 vCol;
+        #include <fog_pars_vertex>
+        void main() {
+          vUv = uv; vCol = iCol;
+          vec4 mvPosition = viewMatrix * vec4(iPos, 1.0);
+          mvPosition.xy += position.xy * iSize; // face the camera, like a sprite
+          gl_Position = projectionMatrix * mvPosition;
+          #include <fog_vertex>
+        }`,
+      fragmentShader: `uniform sampler2D map; varying vec2 vUv; varying vec4 vCol;
+        #include <common>
+        #include <fog_pars_fragment>
+        void main() {
+          vec4 t = texture2D(map, vUv);
+          gl_FragColor = vec4(vCol.rgb * t.rgb, vCol.a * t.a);
+          if (gl_FragColor.a < 0.004) discard;
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+          #include <fog_fragment>
+        }`,
+      transparent: true, depthWrite: false, fog: true,
+      blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+    });
+    this.mesh = new THREE.Mesh(g, mat);
+    this.mesh.frustumCulled = false; // the particles move; the quad's own bounds mean nothing
+    this.mesh.renderOrder = additive ? 2 : 1;
+    this.mesh.userData.shared = true; // lives as long as the renderer: not freed with a battlefield
+    g.userData.shared = true; mat.userData.shared = true;
+  }
+  // write this frame's particles (a list of { p, c, a, s }) and draw just that many
+  update(list) {
+    const n = Math.min(list.length, this.cap);
+    const P = this.pos.array, C = this.col.array, S = this.size.array;
+    for (let i = 0; i < n; i++) {
+      const q = list[i];
+      P[i * 3] = q.p.x; P[i * 3 + 1] = q.p.y; P[i * 3 + 2] = q.p.z;
+      C[i * 4] = q.c.r; C[i * 4 + 1] = q.c.g; C[i * 4 + 2] = q.c.b; C[i * 4 + 3] = q.a;
+      S[i] = q.s;
+    }
+    this.mesh.geometry.instanceCount = n;
+    if (n) {
+      for (const a of [this.pos, this.col, this.size]) { a.clearUpdateRanges(); a.addUpdateRange(0, n * a.itemSize); a.needsUpdate = true; }
+    }
+  }
+}

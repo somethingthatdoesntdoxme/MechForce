@@ -15,14 +15,16 @@
     "@capacitor/cli": "^6.2.0",
     "@fontsource/chakra-petch": "^5.1.0",
     "@fontsource/rajdhani": "^5.1.0",
-    "electron": "^33.2.1",
-    "electron-builder": "^25.1.8",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
     "esbuild": "^0.24.0",
-    "peer": "^1.0.2"
+    "peer": "^1.0.2",
+    "playwright": "^1.65.1"
   },
   "author": "somethingthatdoesntdoxme",
   "license": "MIT",
   "main": "electron/main.cjs",
+  "desktopName": "mechforce.desktop",
   "scripts": {
     "build": "node build.mjs",
     "start": "npm run build && electron .",
@@ -83,7 +85,8 @@
       "executableArgs": [
         "--no-sandbox"
       ],
-      "artifactName": "MechForce-${version}-Linux-SteamDeck.${ext}"
+      "artifactName": "MechForce-${version}-Linux-SteamDeck.${ext}",
+      "syncDesktopName": true
     }
   }
 }
