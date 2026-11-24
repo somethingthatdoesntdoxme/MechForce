@@ -90,7 +90,9 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version: 20, cache: npm }
       - uses: actions/setup-java@v5
-        with: { distribution: temurin, java-version: '17' }
+        # cache Gradle's downloads: fetching every library from Maven Central on every run
+        # gets rate-limited ("429 Too Many Requests") and fails the build
+        with: { distribution: temurin, java-version: '17', cache: gradle }
       - run: npm ci
         env: { ELECTRON_SKIP_BINARY_DOWNLOAD: '1' }
       - run: npm run build
@@ -103,6 +105,13 @@ jobs:
           set +e
           ./gradlew assembleRelease --no-daemon --stacktrace > gradle.log 2>&1
           code=$?
+          # a rate limit or network blip from a package server is worth one more go
+          if [ $code -ne 0 ] && grep -qE "status code (429|5[0-9][0-9])|Connection reset|timed out" gradle.log; then
+            echo "::warning::Package download failed (rate limit or network); retrying once in 60s"
+            sleep 60
+            ./gradlew assembleRelease --no-daemon --stacktrace > gradle.log 2>&1
+            code=$?
+          fi
           tail -n 80 gradle.log
           if [ $code -ne 0 ]; then grep -E "error|What went wrong|FAILURE|Exception" gradle.log | head -n 15 | while read -r l; do echo "::error::$l"; done; exit $code; fi
           set -e
