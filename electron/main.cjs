@@ -15,6 +15,11 @@ const couch = !!(handheld || gamescope);
 if (process.platform === 'linux') {
   app.commandLine.appendSwitch('no-sandbox');
   app.commandLine.appendSwitch('enable-features', 'VaapiVideoDecoder');
+  // Electron 38+ runs as a native Wayland app in a Wayland session. SteamOS game mode
+  // (gamescope) presents games through Xwayland, so stay on X11 there, as Electron 33 did.
+  // Elsewhere native Wayland is fine; MF_OZONE=x11 (or wayland) overrides either way.
+  const ozone = process.env.MF_OZONE || (gamescope ? 'x11' : '');
+  if (ozone) app.commandLine.appendSwitch('ozone-platform', ozone);
 }
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('ignore-gpu-blocklist');

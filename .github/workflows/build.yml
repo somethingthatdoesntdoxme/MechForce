@@ -16,17 +16,17 @@ jobs:
   web:
     name: Rules test + web/server build
     runs-on: ubuntu-24.04
-    outputs:
-      series: ${{ steps.ver.outputs.series }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with: { node-version: 20, cache: npm }
       - run: npm ci
         env: { ELECTRON_SKIP_BINARY_DOWNLOAD: '1' }
-      - id: ver
-        name: Release series from package.json (1.16.0 -> 1.16)
-        run: echo "series=$(node -p "require('./package.json').version.split('.').slice(0, 2).join('.')")" >> "$GITHUB_OUTPUT"
+      - name: Version tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME}" != "v$v" ]; then echo "::error::Tag ${GITHUB_REF_NAME} doesn't match package.json version $v. Bump the version, commit, then tag v$v."; exit 1; fi
       - run: npm test
       - run: npm run build
       - name: Package web + dedicated server
@@ -112,10 +112,40 @@ jobs:
           name: MechForce-Android
           path: MechForce-Android.apk
 
+  screenshots:
+    # Plays a few battles in a headless browser and photographs them, so visual changes in a
+    # pull request can be looked at before merging (download "MechForce-Screenshots" from the
+    # run's page)
+    name: Screenshots
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+        env: { ELECTRON_SKIP_BINARY_DOWNLOAD: '1' }
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - name: Battles on every map type
+        run: node test/look.cjs
+        env: { SHOT: shots, WAIT: '6000' }
+      - name: Mech close-ups
+        run: |
+          for t in temperate volcanic snow; do node test/look-mechs.cjs $t; done
+          QUALITY=low SHOT=shots/low THEMES=temperate,volcanic WAIT=5000 node test/look.cjs
+        env: { SHOT: shots }
+      - uses: actions/upload-artifact@v4
+        with: { name: MechForce-Screenshots, path: shots, retention-days: 14 }
+      - name: Summary
+        run: echo "Screenshots of $(ls shots/*.png shots/low/*.png | wc -l) views are in the MechForce-Screenshots artifact above." >> "$GITHUB_STEP_SUMMARY"
+
   pages:
     name: Publish web version (GitHub Pages)
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
-    needs: [web]
+    # The web version updates with releases, not every push: web players crossplay with the
+    # released desktop and Android builds, so they should run the same version
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/tags/v')
+    needs: [web, release]
     runs-on: ubuntu-24.04
     continue-on-error: true
     environment: { name: github-pages, url: '${{ steps.deploy.outputs.page_url }}' }
@@ -128,7 +158,9 @@ jobs:
 
   release:
     name: Publish release
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # Releases only come from version tags (git tag v1.17.0 && git push origin v1.17.0).
+    # Pushes to main still build and test everything; the builds are on the run's page.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/tags/v')
     needs: [web, windows, linux, android]
     runs-on: ubuntu-24.04
     steps:
@@ -137,8 +169,8 @@ jobs:
       - run: find artifacts -type f | sort
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}.{1}', needs.web.outputs.series, github.run_number) }}
-          name: MechForce ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}.{1}', needs.web.outputs.series, github.run_number) }}
+          tag_name: ${{ github.ref_name }}
+          name: MechForce ${{ github.ref_name }}
           make_latest: true
           files: |
             artifacts/**/*.exe

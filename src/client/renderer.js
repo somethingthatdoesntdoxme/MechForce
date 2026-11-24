@@ -53,7 +53,7 @@ import { renderScale, saverOn } from './perf.js';
 import { buildMech, buildItem, triggerWeaponAnim, tickWeaponAnims, rollTracks, buildStructure, buildUnit, skinMerge, BAKED_MAT, bakedMat, disposeModel } from './models.js';
 import { sfx } from './audio.js';
 import { input } from './input.js';
-import { rnd, patchNoise, hexAtPoint, liquidMaterial, skyDome } from './terrainfx.js';
+import { rnd, patchNoise, hexAtPoint, liquidMaterial, skyDome, ParticleBatch } from './terrainfx.js';
 
 const ELEV = 0.42;
 export const topY = (e) => 0.2 + e * ELEV;
@@ -115,6 +115,11 @@ export class Renderer {
     this.particles = [];
     this.beams = [];
     this.tex = radialTexture(); this.tex.userData.shared = true;
+    // all spawned particles go through two batched meshes (glowing and plain): two draw calls
+    this.partGlow = new ParticleBatch(500, this.tex, true);
+    this.partPlain = new ParticleBatch(500, this.tex, false);
+    this.scene.add(this.partGlow.mesh, this.partPlain.mesh);
+    this.glowList = []; this.plainList = [];
     this.raycaster = new THREE.Raycaster();
     this.time = 0;
     this.queue = Promise.resolve();
@@ -1041,16 +1046,16 @@ export class Renderer {
     const n = opts.n || 1;
     const cap = this.quality === 'low' ? 160 : 500;
     for (let i = 0; i < n; i++) {
-      if (this.particles.length > cap) this.releaseSprite(this.particles.shift().s);
-      const s = this.takeSprite(opts.color || '#ffaa33', opts.normal, opts.opacity ?? 1);
-      s.position.copy(pos);
-      if (opts.spread) s.position.x += (Math.random() - 0.5) * opts.spread, s.position.y += (Math.random() - 0.5) * opts.spread, s.position.z += (Math.random() - 0.5) * opts.spread;
+      if (this.particles.length > cap) this.particles.shift();
+      const p = pos.clone();
+      if (opts.spread) p.x += (Math.random() - 0.5) * opts.spread, p.y += (Math.random() - 0.5) * opts.spread, p.z += (Math.random() - 0.5) * opts.spread;
       const size = (opts.size || 0.4) * (0.7 + Math.random() * 0.6);
-      s.scale.setScalar(size);
       const sp = opts.speed ?? 2;
       const vel = new THREE.Vector3((Math.random() - 0.5) * sp, Math.random() * sp * (opts.up ?? 0.6) + (opts.rise || 0), (Math.random() - 0.5) * sp);
       if (opts.vel) vel.add(opts.vel);
-      this.particles.push({ s, vel, life: opts.life || 0.6, age: 0, size, grow: opts.grow ?? 1.5, gravity: opts.gravity ?? 0, fade: opts.opacity ?? 1 });
+      const c = (this.partColors || (this.partColors = new Map())).get(opts.color || '#ffaa33') || new THREE.Color(opts.color || '#ffaa33');
+      this.partColors.set(opts.color || '#ffaa33', c);
+      this.particles.push({ p, vel, c, glow: !opts.normal, s: size, a: opts.opacity ?? 1, life: opts.life || 0.6, age: 0, size, grow: opts.grow ?? 1.5, gravity: opts.gravity ?? 0, fade: opts.opacity ?? 1 });
     }
   }
   explosion(pos, big = 1) {
@@ -1103,17 +1108,24 @@ export class Renderer {
   }
 
   tickFx(dt) {
-    for (let i = this.particles.length - 1; i >= 0; i--) {
+    const glow = this.glowList, plain = this.plainList;
+    glow.length = 0; plain.length = 0;
+    let live = 0;
+    for (let i = 0; i < this.particles.length; i++) {
       const p = this.particles[i];
       p.age += dt;
-      if (p.age >= p.life) { this.releaseSprite(p.s); this.particles.splice(i, 1); continue; }
+      if (p.age >= p.life) continue;
+      this.particles[live++] = p;
       p.vel.y -= p.gravity * dt;
-      p.s.position.addScaledVector(p.vel, dt);
+      p.p.addScaledVector(p.vel, dt);
       p.vel.multiplyScalar(1 - dt * 1.5);
       const k = p.age / p.life;
-      p.s.scale.setScalar(p.size * (1 + k * p.grow));
-      p.s.material.opacity = (1 - k) * p.fade;
+      p.s = p.size * (1 + k * p.grow);
+      p.a = (1 - k) * p.fade;
+      (p.glow ? glow : plain).push(p);
     }
+    this.particles.length = live;
+    this.partGlow.update(glow); this.partPlain.update(plain);
     for (let i = this.beams.length - 1; i >= 0; i--) {
       const b = this.beams[i];
       b.age += dt;
