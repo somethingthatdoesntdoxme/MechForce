@@ -868,6 +868,10 @@ export class Renderer {
     const off = new THREE.Vector3(Math.sin(c.yaw) * Math.cos(c.pitch), Math.sin(c.pitch), Math.cos(c.yaw) * Math.cos(c.pitch)).multiplyScalar(c.dist);
     this.camera.position.copy(c.target).add(off);
     this.camera.lookAt(c.target);
+    // bring the camera's matrices up to date now: labels are placed (project()) before the
+    // scene is drawn, and would otherwise use last frame's camera, so they'd trail behind
+    // and judder whenever the camera moves
+    this.camera.updateMatrixWorld();
     if (this.scene.fog && this.mapSpan) {
       const f = this.scene.fog;
       f.near = c.dist + this.mapSpan * 0.9;
@@ -1257,9 +1261,14 @@ export class Renderer {
   play(events, state, onEvent) {
     this.pendingAnims++;
     const gen = this.gen;
+    // count animations per battlefield, so leftovers from the previous one (the title-screen
+    // demo battle, say) still finishing in the background don't make this one look busy
+    this.genAnims = this.genAnims || {};
+    this.genAnims[gen] = (this.genAnims[gen] || 0) + 1;
     // a new battlefield (another battle, the editor) makes queued animations stale
     this.queue = this.queue.then(() => (this.gen === gen ? this.runEvents(events, state, onEvent) : null)).catch((e) => console.error(e)).finally(() => {
       this.pendingAnims--;
+      if (!--this.genAnims[gen]) delete this.genAnims[gen];
       if (this.gen !== gen) return;
       if (this.terrainDirty) { this.terrainDirty = false; this.updateTerrain(state.map); }
       this.syncMechs(state);
@@ -1269,7 +1278,7 @@ export class Renderer {
     });
     return this.queue;
   }
-  get busy() { return this.pendingAnims > 0; }
+  get busy() { return !!(this.genAnims && this.genAnims[this.gen]); }
 
   muzzleWorld(v, loc) {
     const mz = v.model.muzzles[loc] || v.model.muzzles[2];
@@ -1287,7 +1296,11 @@ export class Renderer {
     this.framed = null;
     const sp = this.speed || 1;
     const instant = sp >= 8;
+    const gen = this.gen;
     for (const e of events) {
+      // the battlefield changed under us (new battle, back to the title): stop, rather than
+      // keep animating mechs by id, which would now be a different battle's mechs
+      if (this.gen !== gen) return;
       if (onEvent) onEvent(e);
       if (instant) continue;
       const v = e.id !== undefined ? this.mechs.get(e.id) : null;

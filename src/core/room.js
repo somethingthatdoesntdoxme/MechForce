@@ -3,7 +3,7 @@
 import { startReplay, recordCmd, finishReplay } from './replay.js';
 import { createGame, applyCommand, activeSide } from './rules.js';
 import { aiNextCommand } from './ai.js';
-import { MECHS, MISSIONS, PROTOCOL, VERSION, SIDE_NAMES, SIDE_COLORS, mechBV, AI_LEVEL_IDS } from './data.js';
+import { MECHS, MISSIONS, PROTOCOL, VERSION, SIDE_NAMES, SIDE_COLORS, mechBV, AI_LEVEL_IDS, THEMES, MAP_SIZES } from './data.js';
 import { sanitizePilot } from './pilots.js';
 import { buildTemplate } from './custom.js';
 import { fogView, fogEvents, viewTeams } from './fog.js';
@@ -192,6 +192,15 @@ export class Room {
         const s = msg.settings || {};
         for (const k of ['mission', 'mapSize', 'theme', 'tonnage', 'seed', 'sides', 'lanceSize', 'teamMode', 'fog', 'defences', 'forces', 'aiLevel', 'roundLimit']) if (s[k] !== undefined) this.settings[k] = s[k];
         this.settings.fog = !!this.settings.fog;
+        // Anything we don't recognise (a host on a different version, a modded client) falls
+        // back to a default: an unknown mission or map would otherwise break the lobby for
+        // everyone in it
+        if (!MISSIONS.some((m) => m.id === this.settings.mission)) this.settings.mission = 'generic';
+        if (!MAP_SIZES.some((m) => m.id === this.settings.mapSize)) this.settings.mapSize = 'M';
+        if (!THEMES.some((t) => t.id === this.settings.theme)) this.settings.theme = 'temperate';
+        if (!['ffa', 'teams'].includes(this.settings.teamMode)) this.settings.teamMode = 'ffa';
+        this.settings.sides = Math.round(+this.settings.sides) || 2;
+        this.settings.seed = String(this.settings.seed ?? '').slice(0, 40) || rid();
         if (!['none', 'light', 'heavy'].includes(this.settings.defences)) this.settings.defences = 'none';
         if (!['none', 'few', 'many'].includes(this.settings.forces)) this.settings.forces = 'none';
         if (!AI_LEVEL_IDS.includes(this.settings.aiLevel)) this.settings.aiLevel = 'normal';

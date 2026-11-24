@@ -442,7 +442,16 @@ export class Battle {
     if (a === 'camcentre') { const id = ix.mechId ?? (this.state.act ? this.state.act.id : null); if (id !== null && id !== undefined) this.r.focusMech(id); else this.r.focusHex(this.cursor.x, this.cursor.y); return true; }
     switch (ix.mode) {
       case 'briefing':
-        if (a === 'confirm' || a === 'back') { sfx('ui-ok'); if (this.r.busy) { this.ix = { mode: 'anim' }; this.render(); } else this.refresh(); }
+        if (a === 'confirm' || a === 'back') {
+          sfx('ui-ok');
+          if (this.r.busy) {
+            // let the current animation finish, then hand over (don't rely on whichever update
+            // started it to do so: it may have finished its own bookkeeping already)
+            this.ix = { mode: 'anim' }; this.render();
+            const full = this.full;
+            this.r.queue.then(() => { if (this.ix.mode === 'anim' && this.full === full && this.session) this.refresh(); });
+          } else this.refresh();
+        }
         return true;
       case 'pass':
         if (a === 'confirm') { sfx('ui-ok'); this.perspSide = ix.side; this.setFull(this.full); this.r.syncMechs(this.state); this.r.syncStructures(this.state); this.r.syncUnits(this.state); this.beginMyTurn(); }
