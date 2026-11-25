@@ -87,6 +87,7 @@
       ],
       "artifactName": "MechForce-${version}-Linux-SteamDeck.${ext}",
       "syncDesktopName": true
-    }
+    },
+    "afterPack": "build/after-pack.cjs"
   }
 }
