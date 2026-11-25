@@ -15,11 +15,13 @@ const couch = !!(handheld || gamescope);
 if (process.platform === 'linux') {
   app.commandLine.appendSwitch('no-sandbox');
   app.commandLine.appendSwitch('enable-features', 'VaapiVideoDecoder');
-  // Electron 38+ runs as a native Wayland app in a Wayland session. SteamOS game mode
-  // (gamescope) presents games through Xwayland, so stay on X11 there, as Electron 33 did.
-  // Elsewhere native Wayland is fine; MF_OZONE=x11 (or wayland) overrides either way.
-  const ozone = process.env.MF_OZONE || (gamescope ? 'x11' : '');
-  if (ozone) app.commandLine.appendSwitch('ozone-platform', ozone);
+  // Which display system we're on is fixed before this file runs (Electron picks it at
+  // start-up), so it's chosen by the `mechforce` launcher script (build/after-pack.cjs):
+  // X11 by default, as with Electron 33. If we did end up on native Wayland (MF_OZONE=wayland),
+  // keep Vulkan off: Chromium refuses Vulkan on Wayland and quits at start-up.
+  const ozoneArg = process.argv.find((a) => a.startsWith('--ozone-platform='));
+  const ozone = ozoneArg ? ozoneArg.split('=')[1] : process.env.WAYLAND_DISPLAY ? 'wayland' : 'x11';
+  if (ozone !== 'x11') app.commandLine.appendSwitch('disable-features', 'Vulkan');
 }
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
