@@ -127,7 +127,8 @@ export class ParticleBatch {
         void main() {
           vUv = uv; vCol = iCol;
           vec4 mvPosition = viewMatrix * vec4(iPos, 1.0);
-          mvPosition.xy += position.xy * iSize; // face the camera, like a sprite
+          // face the camera, like a sprite; in world units even when the view is scaled (VR)
+          mvPosition.xy += position.xy * iSize * length(viewMatrix[0].xyz);
           gl_Position = projectionMatrix * mvPosition;
           #include <fog_vertex>
         }`,

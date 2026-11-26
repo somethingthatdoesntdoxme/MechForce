@@ -145,6 +145,8 @@ const GLYPHS = {
   xbox: { confirm: 'A', back: 'B', x: 'X', y: 'Y', lb: 'LB', rb: 'RB', lt: 'LT', rt: 'RT', view: '⧉', menu: '≡', up: '▲', down: '▼', left: '◀', right: '▶', lr: 'LB/RB', dpad: '✚', stick: 'L', cam: 'R' },
   ps: { confirm: '✕', back: '○', x: '□', y: '△', lb: 'L1', rb: 'R1', lt: 'L2', rt: 'R2', view: 'SHARE', menu: 'OPT', up: '▲', down: '▼', left: '◀', right: '▶', lr: 'L1/R1', dpad: '✚', stick: 'L', cam: 'R' },
   kb: { confirm: 'Enter', back: 'Esc', x: 'F', y: 'R', lb: '⇧Tab', rb: 'Tab', lt: '−', rt: '+', view: 'T', menu: 'P', up: 'W', down: 'S', left: 'A', right: 'D', lr: 'Tab', dpad: 'WASD', stick: 'WASD', cam: 'Q/E' },
+  // VR controllers (Quest / Index / Vive layouts): face buttons, sticks, grip
+  vr: { confirm: 'A', back: 'B', x: 'X', y: 'Y', lb: 'L◀', rb: 'R stick', lt: '', rt: '', view: 'L stick', menu: '≡', up: 'L▲', down: 'L▼', left: 'L◀', right: 'L▶', lr: 'L◀▶', dpad: 'L stick', stick: 'L stick', cam: 'R stick' },
   touch: { confirm: 'Tap', back: 'Back', x: '', y: '', lb: '‹', rb: '›', lt: '', rt: '', view: '', menu: '☰', up: '', down: '', left: '', right: '', lr: '', dpad: '', stick: '', cam: '' },
 };
 export function glyph(action) {
@@ -156,7 +158,7 @@ export function glyph(action) {
 }
 export function glyphClass(action) {
   const g = glyphSet();
-  if (g === 'xbox' && ['confirm', 'back', 'x', 'y'].includes(action)) return 'g-face g-' + action;
+  if ((g === 'xbox' || g === 'vr') && ['confirm', 'back', 'x', 'y'].includes(action)) return 'g-face g-' + action;
   if (g === 'ps' && ['confirm', 'back', 'x', 'y'].includes(action)) return 'g-face g-ps-' + action;
   return 'g-key';
 }

@@ -650,3 +650,7 @@ table.tt td { padding: 2px 8px 2px 0; vertical-align: top; } table.tt td:first-c
 
 /* frame-rate readout (Settings → Show frame rate) */
 .fps-readout { position: fixed; right: max(8px, env(safe-area-inset-right, 0px)); bottom: max(6px, env(safe-area-inset-bottom, 0px)); z-index: 50; font: 600 12px/1 var(--display); letter-spacing: 0.05em; color: var(--ink-dim); background: rgba(0, 0, 0, 0.45); padding: 4px 7px; border-radius: 4px; pointer-events: none; }
+
+/* VR: offered in battles when a headset is available (web version) */
+#vr-btn { position: fixed; right: 16px; bottom: 96px; z-index: 40; display: flex; align-items: center; gap: 8px; }
+#vr-btn[hidden] { display: none; }
