@@ -18,6 +18,7 @@
     "electron": "^45.4.1",
     "electron-builder": "^26.18.0",
     "esbuild": "^0.24.0",
+    "iwer": "^2.8.0",
     "peer": "^1.0.2",
     "playwright": "^1.65.1"
   },

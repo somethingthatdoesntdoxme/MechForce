@@ -560,8 +560,12 @@ export class Battle {
   // pointer
   pointer(e, kind) {
     if (!this.state) return;
+    this.pointerAt(this.r.pick(e.clientX, e.clientY), kind, e.pointerType === 'touch');
+  }
+  // a hex was pointed at (`move`) or picked (`click`): mouse, touch or a VR controller's laser
+  pointerAt(hit, kind, touch = false) {
+    if (!this.state) return;
     const mode = this.ix.mode;
-    const hit = this.r.pick(e.clientX, e.clientY);
     if (kind === 'move') {
       if (!hit || !['move', 'wait', 'attack', 'facing'].includes(mode)) return;
       if (mode === 'facing') {
@@ -578,7 +582,6 @@ export class Battle {
     }
     if (kind === 'click') {
       if (!hit) return;
-      const touch = e.pointerType === 'touch';
       if (mode === 'move') {
         if (touch && (hit.x !== this.cursor.x || hit.y !== this.cursor.y)) { this.cursor = { x: hit.x, y: hit.y }; this.updateCursorOverlay(); return; }
         this.cursor = { x: hit.x, y: hit.y };

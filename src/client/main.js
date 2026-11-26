@@ -1,3 +1,4 @@
+import { VR } from './vr.js';
 import css from './styles.css';
 import fontDisplay600 from '@fontsource/chakra-petch/files/chakra-petch-latin-600-normal.woff2';
 import fontDisplay700 from '@fontsource/chakra-petch/files/chakra-petch-latin-700-normal.woff2';
@@ -80,8 +81,9 @@ class App {
     window.__mfPerf = perf;
     for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'touchstart']) window.addEventListener(ev, noteInput, { passive: true });
     input.on(noteInput);
-    const loop = (now) => {
-      requestAnimationFrame(loop);
+    // One frame of the game. Driven by requestAnimationFrame normally, and by the headset's
+    // own frame loop while in VR (`xr`: render every headset frame, no frame pacing).
+    this.step = (now, xr = false) => {
       sampleFrame(now - prevRaf); prevRaf = now;
       pollInput(now);
       const moving = Math.abs(input.move.x) + Math.abs(input.move.y) + Math.abs(input.cam.x) + Math.abs(input.cam.y || 0) > 0.3;
@@ -89,7 +91,7 @@ class App {
       // frame pacing: draw every nth display refresh (see perf.js); idle = nobody has touched
       // anything for a few seconds and nothing is animating
       const r = this.renderer, idle = idleFor() > 4000 && !(r.tweens > 0) && !(r.pendingAnims > 0);
-      if (!frameDue(now, idle)) return;
+      if (!xr && !frameDue(now, idle)) return;
       const dt = Math.min(0.05, (now - last) / 1000); last = now;
       if (moving) initAudio();
       fpsN++;
@@ -97,9 +99,16 @@ class App {
       if (this.screen === 'battle') this.battle.tick(dt, now);
       else if (this.screen === 'title') this.renderer.cam.yaw += dt * 0.04;
       else if (this.screenTick) this.screenTick(dt, now);
+      if (this.vr) this.vr.update(dt);
       this.renderer.frame(dt);
     };
+    const loop = (now) => {
+      requestAnimationFrame(loop);
+      if (this.renderer.gl.xr.isPresenting) return; // the headset drives frames (see vr.js)
+      this.step(now);
+    };
     requestAnimationFrame(loop);
+    this.vr = new VR(this);
     const joinCode = (() => { try { return new URLSearchParams(location.search).get('join'); } catch { return null; } })();
     if (joinCode && !IS_ARTIFACT) { this.startAttract(); this.joinOnline(joinCode); }
     else if (servedByHost && location.port === '7373') this.autoJoinHost();

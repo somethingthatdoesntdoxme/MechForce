@@ -60,6 +60,13 @@ export const topY = (e) => 0.2 + e * ELEV;
 export function hexWorld(x, y) { const c = center(x, y); return new THREE.Vector3(c.px, 0, c.py); }
 const facingRot = (f) => { const a = DIR_ANGLE[f] * Math.PI / 180; return Math.atan2(Math.cos(a), Math.sin(a)); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// In VR the player is a giant standing over a tabletop board: the camera's rig is scaled up,
+// so the view matrix carries a 1/scale factor. Sprites add their size in view space, which
+// would make them scale-times too big; multiply by the view matrix's own scale (1 normally).
+if (!THREE.ShaderLib.sprite.vertexShader.includes('mfViewScale')) {
+  THREE.ShaderLib.sprite.vertexShader = THREE.ShaderLib.sprite.vertexShader
+    .replace('mvPosition.xy += rotatedPosition;', 'float mfViewScale = length( viewMatrix[ 0 ].xyz );\n\tmvPosition.xy += rotatedPosition * mfViewScale;');
+}
 
 const THEMES = {
   temperate: { dust: '#8f8068', zenith: '#6c97bd', t: ['#6a8a45', '#55773a', '#3c5b2e', '#857f6c', '#2f6584', '#1f4a68'], side: '#54473a', ground: '#3a4630', fog: '#9fb4bd', sky: '#b9ccd4', hemi: ['#d8ecff', '#4d5b3a'], sun: '#fff1d6', tree: ['#3f6b2c', '#2f5524'], trunk: '#5a4330', rock: '#7d786a', water: '#3a7aa0', lava: false },
@@ -344,7 +351,7 @@ export class Renderer {
     this.bounds = { x0: c0.px - 1, z0: c0.py - 1, x1: c1.px + 1, z1: c1.py + 1 };
     const cx = (this.bounds.x0 + this.bounds.x1) / 2, cz = (this.bounds.z0 + this.bounds.z1) / 2;
     const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshStandardMaterial({ color: th.ground, roughness: 1 }));
-    ground.rotation.x = -Math.PI / 2; ground.position.set(cx, -0.55, cz); ground.receiveShadow = true;
+    ground.rotation.x = -Math.PI / 2; ground.position.set(cx, -0.55, cz); ground.receiveShadow = true; ground.userData.vrHide = true;
     tg.add(ground);
     // trees and rocks
     const treeCount = this.quality === 'low' ? [0, 2, 3] : [0, 3, 6];
@@ -438,7 +445,8 @@ export class Renderer {
     this.cam.want.set(cx, 0, cz); this.cam.target.copy(this.cam.want);
     this.mapCenter = new THREE.Vector3(cx, 0, cz);
     this.mapSpan = Math.hypot(this.bounds.x1 - this.bounds.x0, this.bounds.z1 - this.bounds.z0) / 2;
-    const dome = skyDome(th.fog, th.zenith); dome.position.set(cx, 0, cz); this.world.add(dome);
+    const dome = skyDome(th.fog, th.zenith); dome.position.set(cx, 0, cz); dome.userData.vrHide = true; this.world.add(dome);
+    if (this.gl.xr && this.gl.xr.isPresenting) { ground.visible = false; dome.visible = false; }
     // edge markers group (mission exits)
     this.edgeGroup = new THREE.Group(); this.world.add(this.edgeGroup);
     for (const m of this.mechs.values()) { this.fxGroup.remove(m.smoke); }
@@ -877,7 +885,7 @@ export class Renderer {
     // scene is drawn, and would otherwise use last frame's camera, so they'd trail behind
     // and judder whenever the camera moves
     this.camera.updateMatrixWorld();
-    if (this.scene.fog && this.mapSpan) {
+    if (this.scene.fog && this.mapSpan && !(this.gl.xr && this.gl.xr.isPresenting)) {
       const f = this.scene.fog;
       f.near = c.dist + this.mapSpan * 0.9;
       f.far = f.near + 26 + this.mapSpan * 0.5;
@@ -984,13 +992,22 @@ export class Renderer {
     const r = this.canvas.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
+    return this.pickHit();
+  }
+  // the same, for a ray in world space (a VR controller's laser). Adds `point` and `dist`.
+  pickRay(origin, dir) {
+    if (!this.terrain) return null;
+    this.raycaster.set(origin, dir);
+    return this.pickHit();
+  }
+  pickHit() {
     // mechs first
     const mechObjs = [...this.mechs.values()].filter((v) => v.model.root.visible && !v.state.dead).map((v) => v.model.root);
     const mh = this.raycaster.intersectObjects(mechObjs, true)[0];
     if (mh) {
       let o = mh.object; while (o && !mechObjs.includes(o)) o = o.parent;
       const v = [...this.mechs.values()].find((q) => q.model.root === o);
-      if (v) return { x: v.state.x, y: v.state.y, mech: v.id };
+      if (v) return { ...{ x: v.state.x, y: v.state.y, mech: v.id }, point: mh.point, dist: mh.distance };
     }
     if (this.structs && this.structs.size) {
       const sObjs = [...this.structs.values()].filter((sv) => sv.model.root.visible).map((sv) => sv.model.root);
@@ -998,7 +1015,7 @@ export class Renderer {
       if (sh) {
         let o = sh.object; while (o && !sObjs.includes(o)) o = o.parent;
         const sv = [...this.structs.values()].find((q) => q.model.root === o);
-        if (sv) return { x: sv.state.x, y: sv.state.y, structure: sv.sid };
+        if (sv) return { ...{ x: sv.state.x, y: sv.state.y, structure: sv.sid }, point: sh.point, dist: sh.distance };
       }
     }
     if (this.units && this.units.size) {
@@ -1007,7 +1024,7 @@ export class Renderer {
       if (uh) {
         let o = uh.object; while (o && !uObjs.includes(o)) o = o.parent;
         const uv = [...this.units.values()].find((q) => q.model.root === o);
-        if (uv) return { x: uv.state.x, y: uv.state.y, unit: uv.uid };
+        if (uv) return { ...{ x: uv.state.x, y: uv.state.y, unit: uv.uid }, point: uh.point, dist: uh.distance };
       }
     }
     const hit = this.raycaster.intersectObject(this.terrain, false)[0];
@@ -1019,7 +1036,7 @@ export class Renderer {
     if (dq > dr && dq > ds) rq = -rr2 - rs; else if (dr > ds) rr2 = -rq - rs;
     const o = fromAxial(rq, rr2);
     if (o.x < 0 || o.y < 0 || o.x >= this.map.w || o.y >= this.map.h) return null;
-    return o;
+    return { ...o, point: hit.point, dist: hit.distance };
   }
 
   // Pass `r` (the canvas rect) when projecting many points in a frame: reading the rect
@@ -1084,9 +1101,11 @@ export class Renderer {
     // reuse the dimmest light in the pool
     let l = this.flashPool[0];
     for (const c of this.flashPool) if (c.intensity < l.intensity) l = c;
-    l.position.copy(pos); l.distance = 6 * big; l.intensity = 8 * big;
+    // lights fall off in view space: in VR (scaled view) shrink range and brightness to match
+    const vs = this.viewScale || 1;
+    l.position.copy(pos); l.distance = 6 * big / vs; l.intensity = 8 * big / (vs * vs);
     l.userData.tok = (l.userData.tok || 0) + 1;
-    this.beams.push({ obj: l, age: 0, life: 0.25, light: true, pooled: true, tok: l.userData.tok, base: 8 * big });
+    this.beams.push({ obj: l, age: 0, life: 0.25, light: true, pooled: true, tok: l.userData.tok, base: 8 * big / (vs * vs) });
   }
   beam(a, b, color, width, life = 0.3) {
     const len = a.distanceTo(b);
@@ -1168,6 +1187,8 @@ export class Renderer {
   }
 
   frame(dt) {
+    const xr = this.gl.xr && this.gl.xr.isPresenting;
+    if (this.xrFrameCbs && this.xrFrameCbs.length) { const cbs = this.xrFrameCbs; this.xrFrameCbs = []; for (const cb of cbs) cb(performance.now()); }
     if (this.liquidU) this.liquidU.uTime.value = this.time;
     if (this.fireFx) for (const f of this.fireFx) {
       const t = this.time * (f.glow ? 3 : 7) + f.ph;
@@ -1250,7 +1271,8 @@ export class Renderer {
         const p = v.model.root.position.clone(); p.y += v.model.height * 0.85;
         this.spawn(p, { color: '#dfe6ea', size: 0.2, speed: 0.3, rise: 0.7, life: 1.2, normal: true, opacity: 0.35, grow: 2.5 });
       }
-      // label
+      // label (DOM: not visible in the headset)
+      if (xr) continue;
       const lp = v.model.root.position.clone(); lp.y += v.model.height + 0.35;
       let s = this.project(lp, rect);
       const ghosted = m.hidden && v.ghost && v.ghost.visible;
@@ -1265,7 +1287,8 @@ export class Renderer {
       const busy = this.tweens > 0 || this.pendingAnims > 0;
       if (this.frameNo % (this.shadowEvery || [1, 4])[busy ? 0 : 1] === 0) this.gl.shadowMap.needsUpdate = true;
     }
-    if (this.composer && this.quality !== 'low') this.composer.render(dt);
+    if (xr && this.vrCam) this.gl.render(this.scene, this.vrCam); // post-processing doesn't run in XR
+    else if (this.composer && this.quality !== 'low') this.composer.render(dt);
     else this.gl.render(this.scene, this.camera);
   }
 
@@ -1429,6 +1452,12 @@ export class Renderer {
     }
   }
 
+  // requestAnimationFrame that keeps working in VR: some headsets (Quest) stop the page's own
+  // frame callbacks during an immersive session, so queue them for the next headset frame
+  raf(cb) {
+    if (this.gl.xr && this.gl.xr.isPresenting) (this.xrFrameCbs || (this.xrFrameCbs = [])).push(cb);
+    else requestAnimationFrame(cb);
+  }
   tween(ms, fn) {
     this.tweens = (this.tweens || 0) + 1;
     return new Promise((resolve) => {
@@ -1436,7 +1465,7 @@ export class Renderer {
       const step = () => {
         const k = Math.min(1, (performance.now() - t0) / ms);
         fn(k);
-        if (k < 1) requestAnimationFrame(step); else { this.tweens--; this.gl.shadowMap.needsUpdate = true; resolve(); }
+        if (k < 1) this.raf(step); else { this.tweens--; this.gl.shadowMap.needsUpdate = true; resolve(); }
       };
       step();
     });

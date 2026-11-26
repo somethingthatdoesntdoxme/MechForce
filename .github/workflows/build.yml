@@ -139,9 +139,10 @@ jobs:
       - name: Battles on every map type
         run: node test/look.cjs
         env: { SHOT: shots, WAIT: '6000' }
-      - name: Mech close-ups
+      - name: Mech close-ups and VR (emulated Quest 3)
         run: |
           for t in temperate volcanic snow; do node test/look-mechs.cjs $t; done
+          node test/vr.cjs
           QUALITY=low SHOT=shots/low THEMES=temperate,volcanic WAIT=5000 node test/look.cjs
         env: { SHOT: shots }
       - uses: actions/upload-artifact@v4
